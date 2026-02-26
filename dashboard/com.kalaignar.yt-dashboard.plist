@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.kalaignar.yt-dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/bin/python3</string>
+      <string>/usr/local/bin/yt_dashboard.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/yt-sdi-streamer/dashboard.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/yt-sdi-streamer/dashboard.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>LC_ALL</key>
+      <string>en_US.UTF-8</string>
+      <key>LANG</key>
+      <string>en_US.UTF-8</string>
+    </dict>
+
+    <key>ExitTimeOut</key>
+    <integer>10</integer>
+  </dict>
+</plist>
