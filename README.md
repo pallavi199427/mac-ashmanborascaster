@@ -151,3 +151,10 @@ sudo ytctl status
 - Regex in helper script stored in variables for bash 3.2 compatibility
 - Config file is mode 600 (root-only) — cannot SCP directly
 - LaunchDaemon: `com.kalaignar.yt-sdi-streamer` (streamer), `com.kalaignar.yt-dashboard` (dashboard)
+
+compliatoin flags for decklink 
+[11:20 am, 2/3/2026] Mani Vannan: export CPPFLAGS="-I/Users/kalaignarnetworks/include"
+[11:20 am, 2/3/2026] Mani Vannan: export CFLAGS="$CPPFLAGS"
+[11:20 am, 2/3/2026] Mani Vannan: export LDFLAGS="-L/Users/kalaignarnetworks/lib"
+[11:20 am, 2/3/2026] Mani Vannan: ./configure --enable-gpl --enable-nonfree --enable-decklink \
+  --extra-cflags="$CFLAGS" --extra-ldflags="$LDFLAGS"
