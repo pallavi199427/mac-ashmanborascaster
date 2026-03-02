@@ -22,22 +22,29 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-# Check Python 3
-if ! command -v /usr/bin/python3 &>/dev/null; then
-  echo "Error: Python 3 not found at /usr/bin/python3"
-  echo "Install Xcode Command Line Tools: xcode-select --install"
+# Find Python 3 — prefer real python3.12 over the macOS stub at /usr/bin/python3
+PYTHON3=""
+for candidate in /usr/local/bin/python3.12 /usr/local/bin/python3 /usr/bin/python3; do
+  if "${candidate}" -c "import sys; sys.exit(0 if sys.version_info >= (3,8) else 1)" 2>/dev/null; then
+    PYTHON3="${candidate}"
+    break
+  fi
+done
+if [[ -z "${PYTHON3}" ]]; then
+  echo "Error: Python 3.8+ not found."
+  echo "Install from: https://www.python.org/ftp/python/3.12.8/python-3.12.8-macos11.pkg"
   exit 1
 fi
-echo "[OK] Python 3 found: $(/usr/bin/python3 --version)"
+echo "[OK] Python 3 found: $(${PYTHON3} --version) at ${PYTHON3}"
 
 # Install Flask
 echo "[..] Checking for Flask..."
-if /usr/bin/python3 -c "import flask" 2>/dev/null; then
+if "${PYTHON3}" -c "import flask" 2>/dev/null; then
   echo "[OK] Flask is already installed"
 else
   echo "[..] Installing Flask..."
-  /usr/bin/python3 -m pip install flask --break-system-packages 2>/dev/null \
-    || /usr/bin/python3 -m pip install flask
+  "${PYTHON3}" -m pip install flask --break-system-packages 2>/dev/null \
+    || "${PYTHON3}" -m pip install flask
   echo "[OK] Flask installed"
 fi
 
@@ -78,6 +85,8 @@ ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-bitrate
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-bitrate *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-playback-url
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-playback-url *
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-profiles
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-profile *
 ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-sdi-streamer
 SUDOERS
 chmod 440 "${SUDOERS_FILE}"
@@ -90,6 +99,25 @@ else
   echo "[ERROR] Sudoers validation failed! Removing ${SUDOERS_FILE}"
   rm -f "${SUDOERS_FILE}"
   exit 1
+fi
+
+# Create default profiles file if missing
+PROFILES_FILE="/etc/yt-sdi-streamer-profiles.json"
+if [[ ! -f "${PROFILES_FILE}" ]]; then
+  cat > "${PROFILES_FILE}" <<'PROFILES'
+{
+  "active": "standard",
+  "profiles": {
+    "low":      { "name": "Low",      "platform": "youtube", "stream_key": "", "bitrate": "2500k", "playback_url": "", "channel_id": "", "resolution": "1920x1080" },
+    "standard": { "name": "Standard", "platform": "youtube", "stream_key": "", "bitrate": "4000k", "playback_url": "", "channel_id": "", "resolution": "1920x1080" },
+    "high":     { "name": "High",     "platform": "youtube", "stream_key": "", "bitrate": "8000k", "playback_url": "", "channel_id": "", "resolution": "1920x1080" }
+  }
+}
+PROFILES
+  chmod 644 "${PROFILES_FILE}"
+  echo "[OK] Created default profiles: ${PROFILES_FILE}"
+else
+  echo "[OK] Profiles file already exists: ${PROFILES_FILE}"
 fi
 
 # Make sure ytctl is installed

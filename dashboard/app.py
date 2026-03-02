@@ -24,10 +24,12 @@ HELPER_PATH = "/usr/local/bin/yt_dashboard_helper.sh"
 DASHBOARD_PORT = 8080
 
 QUALITY_PRESETS = {
-    "low":      {"label": "Low",      "bitrate": "2500k", "description": "Bandwidth friendly"},
-    "standard": {"label": "Standard", "bitrate": "4000k", "description": "Recommended default"},
-    "high":     {"label": "High",     "bitrate": "8000k", "description": "High quality"},
+    "low":      {"label": "Low",      "bitrate": "2500k", "resolution": "1280x720",  "description": "Bandwidth friendly"},
+    "standard": {"label": "Standard", "bitrate": "4000k", "resolution": "1920x1080", "description": "Recommended default"},
+    "high":     {"label": "High",     "bitrate": "8000k", "resolution": "1920x1080", "description": "High quality"},
 }
+
+VALID_RESOLUTIONS = {"1920x1080", "1280x720"}
 
 INSTALL_STATIC = "/usr/local/lib/yt-dashboard/static"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -200,6 +202,28 @@ def api_set_bitrate():
     return jsonify({"ok": True, "message": "Bitrate updated. Restart the service for it to take effect."})
 
 
+@app.route("/api/resolution", methods=["GET"])
+def api_get_resolution():
+    ok, output = run_sudo([HELPER_PATH, "read-resolution"])
+    if not ok:
+        return jsonify({"error": output}), 500
+    return jsonify({"resolution": output.strip()})
+
+
+@app.route("/api/resolution", methods=["POST"])
+def api_set_resolution():
+    data = request.get_json(silent=True)
+    if not data or "resolution" not in data:
+        return jsonify({"error": "Missing 'resolution' in request body"}), 400
+    resolution = data["resolution"].strip()
+    if resolution not in VALID_RESOLUTIONS:
+        return jsonify({"error": f"Invalid resolution. Allowed: {', '.join(sorted(VALID_RESOLUTIONS))}"}), 400
+    ok, output = run_sudo([HELPER_PATH, "write-resolution", resolution])
+    if not ok:
+        return jsonify({"error": output}), 500
+    return jsonify({"ok": True, "message": "Resolution updated. Restart the service for it to take effect."})
+
+
 @app.route("/api/presets")
 def api_get_presets():
     return jsonify(QUALITY_PRESETS)
@@ -241,6 +265,65 @@ def api_control():
     return jsonify({"ok": True, "output": output})
 
 
+@app.route("/api/profiles", methods=["GET"])
+def api_get_profiles():
+    ok, output = run_sudo([HELPER_PATH, "read-profiles"])
+    if not ok:
+        return jsonify({"error": output}), 500
+    try:
+        return jsonify(json.loads(output))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid profiles data"}), 500
+
+
+@app.route("/api/profiles/<profile_id>", methods=["POST"])
+def api_save_profile(profile_id):
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Missing request body"}), 400
+    # Read current profiles
+    ok, output = run_sudo([HELPER_PATH, "read-profiles"])
+    if not ok:
+        return jsonify({"error": output}), 500
+    try:
+        profiles = json.loads(output)
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid profiles data"}), 500
+    if profile_id not in profiles.get("profiles", {}):
+        return jsonify({"error": "Profile not found"}), 404
+    # Validate optional fields
+    if "resolution" in data and data["resolution"] not in VALID_RESOLUTIONS:
+        return jsonify({"error": f"Invalid resolution. Allowed: {', '.join(sorted(VALID_RESOLUTIONS))}"}), 400
+    if "bitrate" in data and not re.match(r"^[0-9]{1,6}k?$", data["bitrate"]):
+        return jsonify({"error": "Invalid bitrate format (e.g. 4000k)"}), 400
+    # Update fields
+    p = profiles["profiles"][profile_id]
+    for field in ("name", "platform", "stream_key", "bitrate", "playback_url", "resolution"):
+        if field in data:
+            p[field] = data[field]
+    profiles["profiles"][profile_id] = p
+    # Write back
+    ok, output = run_sudo([HELPER_PATH, "write-profile", json.dumps(profiles)])
+    if not ok:
+        return jsonify({"error": output}), 500
+    # If this is the active profile, also sync to .conf
+    if profiles.get("active") == profile_id:
+        run_sudo([HELPER_PATH, "switch-profile", profile_id])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/profiles/switch", methods=["POST"])
+def api_switch_profile():
+    data = request.get_json(silent=True)
+    if not data or "profile_id" not in data:
+        return jsonify({"error": "Missing 'profile_id'"}), 400
+    profile_id = data["profile_id"]
+    ok, output = run_sudo([HELPER_PATH, "switch-profile", profile_id])
+    if not ok:
+        return jsonify({"error": output}), 500
+    return jsonify({"ok": True, "message": "Profile switched. Restart for changes to take effect."})
+
+
 # ---------- Frontend ----------
 
 HTML = """<!DOCTYPE html>
@@ -255,141 +338,127 @@ HTML = """<!DOCTYPE html>
 </head>
 <body>
 
-  <!-- Header -->
+  <!-- Header Bar -->
   <header class="header">
     <div class="header-left">
       <div class="logo-icon">AB</div>
       <h1>ASHMAN Broadcast</h1>
     </div>
-    <div class="header-right">
-      <div class="conn-indicator">
-        <span class="conn-dot err" id="conn"></span>
-        <span id="connLabel">Connecting...</span>
+    <div class="header-center">
+      <div class="status-group">
+        <span>INGEST</span><span class="status-dot" id="dot-ingest"></span>
       </div>
-      <span class="mode-badge mode-unknown" id="modeBadge">---</span>
+      <div class="status-group">
+        <span>HUB</span><span class="status-dot ok" id="dot-hub"></span>
+      </div>
+      <div class="status-group">
+        <span>UPLINK</span><span class="status-dot" id="dot-uplink"></span>
+      </div>
+    </div>
+    <div class="header-right">
+<span class="header-clock" id="headerClock">--:--:--</span>
     </div>
   </header>
 
-  <div class="container">
+  <!-- Control Bar -->
+  <div class="control-bar">
+    <div class="control-left">
+      <span class="uptime-display" id="s-uptime">00:00:00</span>
+    </div>
+    <div class="control-center">
+      <span class="broadcast-dot stopped" id="broadcastDot"></span>
+      <span class="broadcast-label" id="broadcastLabel">BROADCAST: STOPPED</span>
+    </div>
+    <div class="control-right">
+      <button class="btn-restart-sm" id="btn-restart" disabled onclick="ctrlAction('restart')">Restart</button>
+      <button class="btn-golive" id="btn-golive" disabled onclick="ctrlAction('start')">GO LIVE</button>
+      <button class="btn-stoplive" id="btn-stoplive" style="display:none" disabled onclick="ctrlAction('stop')">STOP</button>
+    </div>
+  </div>
 
-    <!-- Controls -->
-    <div class="glass control-bar">
-      <div class="control-status">
-        <span class="control-dot" id="controlDot"></span>
-        <span class="control-label" id="serviceStatusText">Connecting...</span>
+  <!-- Main Content: Two-Column -->
+  <div class="main-content">
+
+    <!-- Left Panel -->
+    <div class="left-panel">
+      <!-- Input Preview -->
+      <div class="preview-area">
+        <div class="preview-header">
+          <span>INPUT - SDI Signal</span>
+          <div class="preview-badge">
+            <span class="preview-info" id="previewInfo">1920x1080</span>
+            <span class="badge-live" id="previewLive" style="display:none">LIVE</span>
+          </div>
+        </div>
+        <div class="preview-content"></div>
       </div>
-      <div class="control-actions">
-        <button class="btn btn-start" id="btn-start" disabled onclick="ctrlAction('start')">Start</button>
-        <button class="btn btn-stop" id="btn-stop" disabled onclick="ctrlAction('stop')">Stop</button>
-        <button class="btn btn-restart" id="btn-restart" disabled onclick="ctrlAction('restart')">Restart</button>
+      <!-- Playback Embed -->
+      <div class="playback-area">
+        <div class="playback-header" id="playbackHeader" style="display:none">
+          <span class="playback-title">YOUTUBE LIVE</span>
+        </div>
+        <div class="playback-embed" id="playbackEmbed" style="display:none"></div>
+        <span class="playback-placeholder" id="playbackPlaceholder">START BROADCAST TO VIEW STREAM</span>
       </div>
     </div>
 
-    <!-- Settings -->
-    <div class="settings-section">
-      <div class="settings-tabs">
-        <button class="settings-tab active" id="tab-presets" onclick="switchSettingsTab('presets')">Quality Presets</button>
-        <button class="settings-tab" id="tab-configure" onclick="switchSettingsTab('configure')">Configure</button>
-      </div>
+    <!-- Right Sidebar -->
+    <div class="right-sidebar">
 
-      <!-- Presets Panel -->
-      <div class="settings-panel active" id="panel-presets">
-        <div class="presets-grid" id="presetsGrid">
-          <div class="no-data">Loading presets...</div>
+      <!-- Stream Profiles (rendered dynamically by JS) -->
+      <div class="sidebar-panel">
+        <div class="panel-header">
+          <span class="panel-title">STREAM PROFILES</span>
         </div>
-        <div class="preset-status" id="presetStatus"></div>
+        <div id="profilesList"></div>
       </div>
-
-      <!-- Configure Panel -->
-      <div class="settings-panel" id="panel-configure">
-        <div class="glass configure-card">
-          <div class="cfg-row">
-            <div class="cfg-label">Video Bitrate</div>
-            <div class="cfg-value"><span class="key-display" id="bitrateDisplay">Loading...</span></div>
-            <div class="cfg-input">
-              <input class="key-input" id="bitrateInput" placeholder="e.g. 4000k, 8000k" autocomplete="off" spellcheck="false">
-              <button class="btn-sm btn-save" id="btnSaveBitrate" disabled onclick="saveBitrate()">Save</button>
-            </div>
-          </div>
-          <div class="cfg-divider"></div>
-          <div class="cfg-row">
-            <div class="cfg-label">Playback URL</div>
-            <div class="cfg-value"><span class="key-display" id="playbackUrlDisplay">Loading...</span></div>
-            <div class="cfg-input">
-              <input class="key-input" id="playbackUrlInput" placeholder="https://youtu.be/..." autocomplete="off" spellcheck="false">
-              <button class="btn-sm btn-save" id="btnSavePlaybackUrl" disabled onclick="savePlaybackUrl()">Save</button>
-            </div>
-          </div>
-          <div class="cfg-divider"></div>
-          <div class="cfg-row">
-            <div class="cfg-label">Stream Key</div>
-            <div class="cfg-value">
-              <span class="key-display" id="keyDisplay">Loading...</span>
-              <button class="btn-sm btn-reveal" id="btnReveal" onclick="toggleReveal()">Reveal</button>
-            </div>
-            <div class="cfg-input">
-              <input class="key-input" id="keyInput" placeholder="Enter new stream key..." autocomplete="off" spellcheck="false">
-              <button class="btn-sm btn-save" id="btnSaveKey" disabled onclick="saveKey()">Save</button>
-            </div>
-          </div>
-          <div class="cfg-hint">Changes require a broadcast restart to take effect.</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Metrics -->
-    <div class="metrics-grid">
-
       <!-- Broadcast Status -->
-      <div class="glass metric-card">
-        <div class="card-header">
-          <h3>Broadcast Status</h3>
-          <div class="card-icon icon-status">&#9881;</div>
+      <div class="sidebar-panel">
+        <div class="panel-header">
+          <span class="panel-title">BROADCAST STATUS</span>
         </div>
-        <div class="stat-featured">
-          <div class="big-value" id="s-uptime">--:--:--</div>
-          <div class="big-label">Uptime</div>
+        <div class="panel-body">
+          <div class="stat-row"><span class="stat-label">Mode</span><span class="stat-value" id="s-mode">-</span></div>
+          <div class="stat-row"><span class="stat-label">State</span><span class="stat-value" id="s-state">-</span></div>
+          <div class="stat-row"><span class="stat-label">Bitrate</span><span class="stat-value" id="s-bitrate">-</span></div>
+          <div class="stat-row"><span class="stat-label">Enc Bitrate</span><span class="stat-value" id="s-enc-bitrate">-</span></div>
+          <div class="stat-row"><span class="stat-label">FPS</span><span class="stat-value" id="s-fps">-</span></div>
+          <div class="stat-row"><span class="stat-label">Speed</span><span class="stat-value" id="s-speed">-</span></div>
+          <div class="stat-row"><span class="stat-label">Last Update</span><span class="stat-value" id="s-ts">-</span></div>
         </div>
-        <div class="stat-row"><span class="stat-label">Mode</span><span class="stat-value" id="s-mode">-</span></div>
-        <div class="stat-row"><span class="stat-label">State</span><span class="stat-value" id="s-state">-</span></div>
-        <div class="stat-row"><span class="stat-label">Bitrate (config)</span><span class="stat-value" id="s-bitrate">-</span></div>
-        <div class="stat-row"><span class="stat-label">Enc Bitrate</span><span class="stat-value" id="s-enc-bitrate">-</span></div>
-        <div class="stat-row"><span class="stat-label">FPS</span><span class="stat-value" id="s-fps">-</span></div>
-        <div class="stat-row"><span class="stat-label">Speed</span><span class="stat-value" id="s-speed">-</span></div>
-        <div class="stat-row"><span class="stat-label">Last Update</span><span class="stat-value" id="s-ts">-</span></div>
       </div>
 
       <!-- Network -->
-      <div class="glass metric-card">
-        <div class="card-header">
-          <h3>Network</h3>
-          <div class="card-icon icon-network">&#9729;</div>
+      <div class="sidebar-panel">
+        <div class="panel-header">
+          <span class="panel-title">NETWORK</span>
         </div>
-        <div class="stat-row"><span class="stat-label">Interface</span><span class="stat-value" id="n-iface">-</span></div>
-        <div class="stat-row"><span class="stat-label">IP Address</span><span class="stat-value" id="n-ip">-</span></div>
-        <div class="stat-row"><span class="stat-label">Gateway</span><span class="stat-value" id="n-gw">-</span></div>
-        <div class="stat-row"><span class="stat-label">RX Rate</span><span class="stat-value" id="n-rx-rate">-</span></div>
-        <div class="stat-row"><span class="stat-label">TX Rate</span><span class="stat-value" id="n-tx-rate">-</span></div>
-        <div class="stat-row"><span class="stat-label">Packet Loss</span><span class="stat-value" id="n-loss">-</span></div>
-        <div class="stat-row"><span class="stat-label">Latency</span><span class="stat-value" id="n-avg">-</span></div>
-        <div class="stat-row"><span class="stat-label">Jitter</span><span class="stat-value" id="n-jitter">-</span></div>
+        <div class="panel-body">
+          <div class="stat-row"><span class="stat-label">Interface</span><span class="stat-value" id="n-iface">-</span></div>
+          <div class="stat-row"><span class="stat-label">IP Address</span><span class="stat-value" id="n-ip">-</span></div>
+          <div class="stat-row"><span class="stat-label">Gateway</span><span class="stat-value" id="n-gw">-</span></div>
+          <div class="stat-row"><span class="stat-label">RX Rate</span><span class="stat-value" id="n-rx-rate">-</span></div>
+          <div class="stat-row"><span class="stat-label">TX Rate</span><span class="stat-value" id="n-tx-rate">-</span></div>
+          <div class="stat-row"><span class="stat-label">Packet Loss</span><span class="stat-value" id="n-loss">-</span></div>
+          <div class="stat-row"><span class="stat-label">Latency</span><span class="stat-value" id="n-avg">-</span></div>
+          <div class="stat-row"><span class="stat-label">Jitter</span><span class="stat-value" id="n-jitter">-</span></div>
+        </div>
+      </div>
+
+      <!-- Event Log -->
+      <div class="sidebar-panel">
+        <div class="panel-header">
+          <span class="panel-title">EVENT LOG</span>
+        </div>
+        <div class="event-log-scroll">
+          <table class="events-table">
+            <thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead>
+            <tbody id="eventsBody"><tr><td colspan="3" class="no-data">Loading events...</td></tr></tbody>
+          </table>
+        </div>
       </div>
 
     </div>
-
-    <!-- Events -->
-    <div class="glass events-card">
-      <div class="card-header">
-        <h3>Recent Events</h3>
-      </div>
-      <div class="events-scroll">
-        <table class="events-table">
-          <thead><tr><th>Time</th><th>Level</th><th>Event</th><th>Message</th></tr></thead>
-          <tbody id="eventsBody"><tr><td colspan="4" class="no-data">Loading events...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-
   </div>
 
   <!-- Confirmation Modal -->
@@ -399,7 +468,7 @@ HTML = """<!DOCTYPE html>
       <p id="confirmMsg">Are you sure?</p>
       <div class="modal-actions">
         <button class="btn-cancel" onclick="hideConfirmModal()">Cancel</button>
-        <button class="btn btn-stop" id="confirmBtn">Confirm</button>
+        <button class="btn-confirm-stop" id="confirmBtn">Confirm</button>
       </div>
     </div>
   </div>

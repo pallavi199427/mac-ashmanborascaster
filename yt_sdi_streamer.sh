@@ -492,14 +492,24 @@ audio_args() {
   printf '%s' "-c:a aac -b:a ${abr} -ar ${AUDIO_RATE} -ac ${AUDIO_CHANNELS}"
 }
 
+build_live_vf() {
+  # Build scale filter from OUTPUT_RESOLUTION (e.g. 1920x1080 -> 1920:1080)
+  local res="${OUTPUT_RESOLUTION:-1920x1080}"
+  local wh="${res/x/:}"
+  # Keep deinterlace + fps + scale, always ending with yuv420p
+  printf '%s' "bwdif=mode=1:parity=tff:deint=all,fps=25,scale=${wh}:flags=lanczos,format=yuv420p"
+}
+
 build_ffmpeg_live_cmd() {
+  local vf
+  vf="$(build_live_vf)"
   cat <<EOF
 "${FFMPEG_BIN}" -hide_banner -loglevel info \\
   -thread_queue_size 8192 \\
   -fflags +genpts -use_wallclock_as_timestamps 1 \\
   -f decklink -video_input ${VIDEO_INPUT} -audio_input ${AUDIO_INPUT} \\
   -i "${DECKLINK_DEVICE}" \\
-  -vf "${LIVE_VIDEO_FILTER}" \\
+  -vf "${vf}" \\
   -af "aresample=async=1:first_pts=0:min_hard_comp=0.100" \\
   -color_primaries ${COLOR_PRIMARIES} -color_trc ${COLOR_TRC} -colorspace ${COLOR_SPACE} -color_range tv \\
   -c:v h264_videotoolbox -profile:v high -level 4.2 \\
@@ -522,9 +532,11 @@ build_ffmpeg_standby_cmd() {
     overlay_prefix="[0:v][1:v]overlay=${LOGO_X}:${LOGO_Y},"
   fi
 
+  local standby_res="${OUTPUT_RESOLUTION:-1920x1080}"
+
   cat <<EOF
 TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel info \\
-  -f lavfi -i "color=c=${STANDBY_BG_COLOR}:s=${STANDBY_SIZE}:r=${STANDBY_FPS}" \\
+  -f lavfi -i "color=c=${STANDBY_BG_COLOR}:s=${standby_res}:r=${STANDBY_FPS}" \\
   ${logo_input} \\
   -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE}" \\
   -filter_complex "${overlay_prefix}drawtext=fontfile=${FONT_FILE}:text='${STANDBY_TITLE}':x=${TEXT_X}:y=${TEXT_Y}:fontsize=${TITLE_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.35:boxborderw=18,drawtext=fontfile=${FONT_FILE}:text='%{localtime\\:%Y-%m-%d %H\\\\:%M\\\\:%S}':x=${TEXT_X}:y=${TEXT_Y}+${CLOCK_DY}:fontsize=${CLOCK_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.25:boxborderw=14,drawtext=fontfile=${FONT_FILE}:text='${STANDBY_SUBTITLE}':x=${TEXT_X}:y=${TEXT_Y}+${SUBTITLE_DY}:fontsize=${SUBTITLE_FONTSIZE}:fontcolor=white@0.95" \\
