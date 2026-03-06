@@ -77,6 +77,8 @@ case "${cmd}" in
       echo "Invalid bitrate format (e.g. 4000k)" >&2
       exit 1
     fi
+    # Ensure 'k' suffix is always present (ffmpeg treats bare number as bits, not kbits)
+    [[ "${bitrate}" != *k ]] && bitrate="${bitrate}k"
     sed -i '' "s/^BITRATE_MAX_K=.*/BITRATE_MAX_K=${bitrate}/" "${CONF}"
     sed -i '' "s/^BUFSIZE_MAX_K=.*/BUFSIZE_MAX_K=${bitrate}/" "${CONF}"
     echo "OK"
@@ -155,6 +157,8 @@ print(p.get('resolution', '1920x1080'))
       sed -i '' "s/^STREAM_KEY=.*/STREAM_KEY=\"${sk}\"  # SECRET/" "${CONF}"
     fi
     if [[ -n "${br}" ]]; then
+      # Ensure 'k' suffix is always present
+      [[ "${br}" != *k ]] && br="${br}k"
       sed -i '' "s/^BITRATE_MAX_K=.*/BITRATE_MAX_K=${br}/" "${CONF}"
       sed -i '' "s/^BUFSIZE_MAX_K=.*/BUFSIZE_MAX_K=${br}/" "${CONF}"
     fi

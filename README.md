@@ -152,6 +152,22 @@ sudo ytctl status
 - Config file is mode 600 (root-only) — cannot SCP directly
 - LaunchDaemon: `com.kalaignar.yt-sdi-streamer` (streamer), `com.kalaignar.yt-dashboard` (dashboard)
 
+## Streamer Resilience (applied 2026-03-03)
+
+Seven deadlock/hang fixes in `yt_sdi_streamer.sh`:
+
+1. `_cleanup` trap (SIGTERM/SIGINT/EXIT) with global `_MAIN_*` PIDs — kills all children on exit
+2. `flock` singleton (`/var/run/yt-sdi-streamer.lock`) — prevents double-decklink on rapid restart
+3. `probe_sdi_signal`: `timeout 5` wrapper — prevents supervisor hang on stuck decklink driver
+4. Monitor tail PID tracked via `monitor_tail.$$` temp file — kills grandchild `tail` before `wait`, fixing 15-min deadlock
+5. RTMP output: `-rw_timeout 15000000` (15s) — ffmpeg self-terminates on network stall
+6. Nosignal counter resets on any non-error line
+7. `sleep 1` after SIGKILL in `kill_running_ffmpeg` — allows decklink device to release
+
+## Mac Mini Post-Deployment Steps
+
+- **TCP keepalive timeout** must be set after deployment — the setting is overwritten on reboot and must be persisted properly (exact file/method TBD)
+
 compliatoin flags for decklink 
 [11:20 am, 2/3/2026] Mani Vannan: export CPPFLAGS="-I/Users/kalaignarnetworks/include"
 [11:20 am, 2/3/2026] Mani Vannan: export CFLAGS="$CPPFLAGS"

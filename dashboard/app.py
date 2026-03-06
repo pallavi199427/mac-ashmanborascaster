@@ -196,6 +196,8 @@ def api_set_bitrate():
     bitrate = data["bitrate"].strip()
     if not re.match(r"^[0-9]{1,6}k?$", bitrate):
         return jsonify({"error": "Invalid bitrate format (e.g. 4000k)"}), 400
+    if not bitrate.endswith("k"):
+        bitrate = bitrate + "k"
     ok, output = run_sudo([HELPER_PATH, "write-bitrate", bitrate])
     if not ok:
         return jsonify({"error": output}), 500
@@ -300,7 +302,11 @@ def api_save_profile(profile_id):
     p = profiles["profiles"][profile_id]
     for field in ("name", "platform", "stream_key", "bitrate", "playback_url", "resolution"):
         if field in data:
-            p[field] = data[field]
+            val = data[field]
+            # Ensure bitrate always has 'k' suffix (ffmpeg treats bare number as bits)
+            if field == "bitrate" and val and not val.endswith("k"):
+                val = val + "k"
+            p[field] = val
     profiles["profiles"][profile_id] = p
     # Write back
     ok, output = run_sudo([HELPER_PATH, "write-profile", json.dumps(profiles)])
@@ -445,18 +451,6 @@ HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Event Log -->
-      <div class="sidebar-panel">
-        <div class="panel-header">
-          <span class="panel-title">EVENT LOG</span>
-        </div>
-        <div class="event-log-scroll">
-          <table class="events-table">
-            <thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead>
-            <tbody id="eventsBody"><tr><td colspan="3" class="no-data">Loading events...</td></tr></tbody>
-          </table>
-        </div>
-      </div>
 
     </div>
   </div>

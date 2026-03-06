@@ -5,6 +5,8 @@ const EVENTS_POLL_MS = 10000;
 let actionInProgress = false;
 let lastServiceState = null;
 let prevNet = null;
+let rxHistory = [];
+let txHistory = [];
 let profilesData = null; // { active: 'profile1', profiles: { ... } }
 let openEditPanel = null;
 let revealedKeys = {}; // profileId -> true/false
@@ -428,7 +430,7 @@ function updateStatusDots(m, running) {
   if (dotIngest) {
     if (!running) {
       dotIngest.className = 'status-dot';
-    } else if (m.state === 'running') {
+    } else if (m.sdi_signal === 1) {
       dotIngest.className = 'status-dot ok';
     } else {
       dotIngest.className = 'status-dot err';
@@ -458,15 +460,28 @@ function updateNetwork(m, running) {
   const nowMs = Date.now();
   if (prevNet && n.rx_bytes != null && n.tx_bytes != null) {
     const dtSec = (nowMs - prevNet.ts) / 1000;
-    if (dtSec > 0) {
+    if (dtSec > 1 && (n.rx_bytes !== prevNet.rx || n.tx_bytes !== prevNet.tx)) {
       const rxRate = Math.max(0, (n.rx_bytes - prevNet.rx) / dtSec);
       const txRate = Math.max(0, (n.tx_bytes - prevNet.tx) / dtSec);
-      setText('n-rx-rate', fmtRate(rxRate));
-      setText('n-tx-rate', fmtRate(txRate));
+      rxHistory.push(rxRate);
+      txHistory.push(txRate);
+      if (rxHistory.length > 3) rxHistory.shift();
+      if (txHistory.length > 3) txHistory.shift();
+      prevNet = { rx: n.rx_bytes, tx: n.tx_bytes, ts: nowMs };
     }
-  }
-  if (n.rx_bytes != null) {
+  } else if (n.rx_bytes != null) {
     prevNet = { rx: n.rx_bytes, tx: n.tx_bytes, ts: nowMs };
+  }
+  if (!running) {
+    rxHistory = [];
+    txHistory = [];
+    setText('n-rx-rate', '-');
+    setText('n-tx-rate', '-');
+  } else if (rxHistory.length > 0) {
+    const avgRx = rxHistory.reduce((a, b) => a + b, 0) / rxHistory.length;
+    const avgTx = txHistory.reduce((a, b) => a + b, 0) / txHistory.length;
+    setText('n-rx-rate', fmtRate(avgRx));
+    setText('n-tx-rate', fmtRate(avgTx));
   }
 
   const ping = n.ping || {};

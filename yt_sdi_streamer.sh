@@ -35,6 +35,7 @@ STATUS_JSON="${LOG_DIR}/status.json"
 METRICS_JSON="${LOG_DIR}/metrics.json"
 PID_FILE="${LOG_DIR}/streamer.pid"
 PROGRESS_FILE="${LOG_DIR}/ffmpeg.progress"
+SDI_SIGNAL_FILE="${LOG_DIR}/sdi_signal"
 
 LIB_DIR="${LIB_DIR:-/usr/local/lib/yt-sdi-streamer}"
 ALERTS_DIR="${ALERTS_DIR:-${LIB_DIR}/alerts}"
@@ -42,6 +43,26 @@ ALERT_SCRIPT="${ALERT_SCRIPT:-${ALERTS_DIR}/alert.sh}"
 
 mkdir -p "${LOG_DIR}"
 chmod 755 "${LOG_DIR}"
+
+# ---------- Singleton lock — prevent two instances fighting over decklink ----------
+LOCK_FILE="/var/run/yt-sdi-streamer.lock"
+if [[ -f "${LOCK_FILE}" ]]; then
+  OLD_PID="$(cat "${LOCK_FILE}" 2>/dev/null || true)"
+  if [[ -n "${OLD_PID}" ]] && kill -0 "${OLD_PID}" 2>/dev/null; then
+    echo "Killing previous instance (PID ${OLD_PID}) and its children..." >&2
+    kill -TERM -- -"${OLD_PID}" 2>/dev/null || kill -TERM "${OLD_PID}" 2>/dev/null || true
+    sleep 1
+    kill -KILL -- -"${OLD_PID}" 2>/dev/null || kill -KILL "${OLD_PID}" 2>/dev/null || true
+    sleep 0.5
+  fi
+  # Also kill any orphan yt_sdi_streamer processes from previous runs (except us)
+  for _opid in $(/usr/bin/pgrep -f "yt_sdi_streamer.sh" 2>/dev/null || true); do
+    [[ "${_opid}" == "$$" ]] && continue
+    kill -KILL "${_opid}" 2>/dev/null || true
+  done
+  sleep 0.5
+fi
+echo $$ > "${LOCK_FILE}"
 
 # ---------- Runtime state ----------
 MODE="standby" # live|standby
@@ -60,6 +81,7 @@ BACKOFF=0
 # SDI probe counters (for UX + tuning)
 PROBE_OK_COUNT=0
 PROBE_BAD_COUNT=0
+SDI_SIGNAL_STATE=-1  # -1=unknown, 0=no signal, 1=signal present
 
 # Hysteresis counters
 OK_COUNT=0
@@ -88,6 +110,39 @@ NET_TX_BYTES=0
 NET_PING_LOSS=""
 NET_PING_AVG_MS=""
 NET_PING_JITTER_MS=""
+
+# ---------- Global child PIDs for cleanup trap ----------
+_CLEANUP_DONE=0
+_MAIN_FFMPEG_PID=""
+_MAIN_TAIL_PID=""
+_MAIN_MONITOR_PID=""
+_MAIN_METRICS_PID=""
+_MAIN_STALL_PID=""
+_MAIN_MONITOR_TAIL_PID=""
+
+_cleanup() {
+  [[ "${_CLEANUP_DONE}" == "1" ]] && return
+  _CLEANUP_DONE=1
+  trap '' SIGTERM SIGINT EXIT
+  declare -f kill_running_ffmpeg >/dev/null 2>&1 && kill_running_ffmpeg 2>/dev/null || true
+  # Kill all known child PIDs
+  local _p
+  for _p in "${_MAIN_FFMPEG_PID}" "${_MAIN_TAIL_PID}" "${_MAIN_MONITOR_TAIL_PID}" \
+             "${_MAIN_MONITOR_PID}" "${_MAIN_METRICS_PID}" "${_MAIN_STALL_PID}"; do
+    [[ -n "${_p}" ]] && kill "${_p}" 2>/dev/null || true
+  done
+  sleep 0.3
+  for _p in "${_MAIN_FFMPEG_PID}" "${_MAIN_TAIL_PID}" "${_MAIN_MONITOR_TAIL_PID}" \
+             "${_MAIN_MONITOR_PID}" "${_MAIN_METRICS_PID}" "${_MAIN_STALL_PID}"; do
+    [[ -n "${_p}" ]] && kill -KILL "${_p}" 2>/dev/null || true
+  done
+  # Kill entire process group to catch any orphaned children
+  kill -TERM -- -$$ 2>/dev/null || true
+  sleep 0.2
+  kill -KILL -- -$$ 2>/dev/null || true
+  rm -f "${LOCK_FILE}" 2>/dev/null || true
+}
+trap '_cleanup' SIGTERM SIGINT EXIT
 
 # ---------- Helpers ----------
 ts_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
@@ -388,8 +443,13 @@ write_metrics_snapshot() {
   local net_obj
   net_obj="{\"service\":\"$(json_escape "${NETWORK_SERVICE:-unknown}")\",\"iface\":\"$(json_escape "${NET_IFACE:-unknown}")\",\"ip\":\"$(json_escape "${NET_IP:-unknown}")\",\"gateway\":\"$(json_escape "${NET_GW:-unknown}")\",\"dns\":\"$(json_escape "${NET_DNS:-unknown}")\",\"rx_bytes\":${NET_RX_BYTES},\"tx_bytes\":${NET_TX_BYTES},\"ping\":${ping_obj}}"
 
+  local sdi_sig
+  sdi_sig="$(cat "${SDI_SIGNAL_FILE}" 2>/dev/null || echo "-1")"
+  sdi_sig="${sdi_sig//[^0-9-]/}"
+  [[ -z "${sdi_sig}" ]] && sdi_sig="-1"
+
   atomic_write "${METRICS_JSON}" <<EOF
-{"ts":"${t}","uptime_s":${uptime},"mode":"$(json_escape "${MODE}")","state":"$(json_escape "${state}")","bitrate":"$(json_escape "${CURRENT_BITRATE}")","ffmpeg":${ff_detail},"switching":{"ok_count":${OK_COUNT},"bad_count":${BAD_COUNT},"probe_ok":${PROBE_OK_COUNT},"probe_bad":${PROBE_BAD_COUNT}},"restarts":{"consecutive_failures":${CONSEC_FAILS},"backoff_s":${BACKOFF},"total_mode_starts":${TOTAL_MODE_STARTS},"total_ffmpeg_exits":${TOTAL_FFMPEG_EXITS},"last_exit_rc":${LAST_EXIT_RC}},"network":${net_obj}}
+{"ts":"${t}","uptime_s":${uptime},"mode":"$(json_escape "${MODE}")","state":"$(json_escape "${state}")","sdi_signal":${sdi_sig},"bitrate":"$(json_escape "${CURRENT_BITRATE}")","ffmpeg":${ff_detail},"switching":{"ok_count":${OK_COUNT},"bad_count":${BAD_COUNT},"probe_ok":${PROBE_OK_COUNT},"probe_bad":${PROBE_BAD_COUNT}},"restarts":{"consecutive_failures":${CONSEC_FAILS},"backoff_s":${BACKOFF},"total_mode_starts":${TOTAL_MODE_STARTS},"total_ffmpeg_exits":${TOTAL_FFMPEG_EXITS},"last_exit_rc":${LAST_EXIT_RC}},"network":${net_obj}}
 EOF
 }
 
@@ -463,14 +523,39 @@ watch_output_stall() {
 }
 
 probe_sdi_signal() {
-  local out
+  local out probe_pid
+  local probe_out_file="${LOG_DIR}/probe_out.$$"
 
-  out="$("${FFMPEG_BIN}" -hide_banner -loglevel info \
+  # Run probe in background with wall-clock timeout to prevent hanging
+  # on a stuck decklink driver (ffmpeg -t is content-duration, not wall-clock).
+  "${FFMPEG_BIN}" -hide_banner -loglevel info \
       -f decklink -video_input "${VIDEO_INPUT}" -audio_input "${AUDIO_INPUT}" \
       -i "${DECKLINK_DEVICE}" \
-      -t 1 -f null - 2>&1 || true)"
+      -t 1 -f null - >"${probe_out_file}" 2>&1 &
+  probe_pid=$!
 
-  if echo "${out}" | grep -q "No input signal detected"; then
+  # Wait up to 5 seconds for probe to complete
+  local i
+  for i in 1 2 3 4 5; do
+    if ! kill -0 "${probe_pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  # If still running after 5s, force-kill it
+  if kill -0 "${probe_pid}" 2>/dev/null; then
+    kill -KILL "${probe_pid}" 2>/dev/null || true
+    wait "${probe_pid}" 2>/dev/null || true
+    rm -f "${probe_out_file}"
+    return 1
+  fi
+
+  wait "${probe_pid}" 2>/dev/null || true
+  out="$(cat "${probe_out_file}" 2>/dev/null || true)"
+  rm -f "${probe_out_file}"
+
+  if echo "${out}" | grep -qiE "No input signal detected|No signal|Cannot Autodetect input"; then
     return 1
   fi
   if echo "${out}" | grep -q "Input #0, decklink"; then
@@ -519,6 +604,7 @@ build_ffmpeg_live_cmd() {
   $(audio_args) \\
   -stats_period 1 -progress "${PROGRESS_FILE}" \\
   -flvflags no_duration_filesize \\
+  -rw_timeout 15000000 \\
   -f flv "${RTMP_ENDPOINT}"
 EOF
 }
@@ -547,6 +633,7 @@ TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel info \\
   $(audio_args) \\
   -stats_period 1 -progress "${PROGRESS_FILE}" \\
   -flvflags no_duration_filesize \\
+  -rw_timeout 15000000 \\
   -f flv "${RTMP_ENDPOINT}"
 EOF
 }
@@ -557,6 +644,7 @@ kill_running_ffmpeg() {
   sleep 0.5
   /usr/bin/pkill -KILL -f "${FFMPEG_BIN}.*${DECKLINK_DEVICE}" >/dev/null 2>&1 || true
   /usr/bin/pkill -KILL -f "${FFMPEG_BIN}.*color=c=${STANDBY_BG_COLOR}" >/dev/null 2>&1 || true
+  sleep 1
 }
 
 preflight() {
@@ -592,6 +680,7 @@ preflight() {
 
   RTMP_ENDPOINT="${YOUTUBE_RTMP_URL}/${STREAM_KEY}"
   echo $$ > "${PID_FILE}"
+  echo "-1" > "${SDI_SIGNAL_FILE}"
 
   log_event "INFO" "boot" "yt-sdi-streamer starting"
   run_alert "boot" "{}"
@@ -661,6 +750,7 @@ run_ffmpeg_mode() {
   local mode="$1"
   MODE="${mode}"
   TOTAL_MODE_STARTS=$((TOTAL_MODE_STARTS+1))
+  START_EPOCH="$(date +%s)"
 
   cleanup_logs_by_size
 
@@ -675,16 +765,19 @@ run_ffmpeg_mode() {
   if [[ "${ENABLE_OUTPUT_STALL_WATCHDOG}" == "true" ]]; then
     watch_output_stall &
     stall_pid="$!"
+    _MAIN_STALL_PID="${stall_pid}"
     log_event "INFO" "stall_watchdog_start" "Started output stall watchdog" "\"pid\":${stall_pid}"
   fi
 
   metrics_loop &
   metrics_pid="$!"
+  _MAIN_METRICS_PID="${metrics_pid}"
 
   local rc
   local ffmpeg_pid=""
   local nosignal_file="${LOG_DIR}/nosignal.$$"
   local monitor_pid="" tail_pid=""
+  local monitor_tail_pid_file="${LOG_DIR}/monitor_tail.$$"
 
   # Ensure ffmpeg log exists before tail starts
   touch "${FFMPEG_LOG}"
@@ -694,75 +787,108 @@ run_ffmpeg_mode() {
     # Launch ffmpeg in background to get reliable PID + exit code
     bash -c "$(build_ffmpeg_live_cmd)" >> "${FFMPEG_LOG}" 2>&1 &
     ffmpeg_pid=$!
+    _MAIN_FFMPEG_PID="${ffmpeg_pid}"
 
     # Tail ffmpeg log to stdout for visibility
     tail -n +1 -f "${FFMPEG_LOG}" &
     tail_pid=$!
+    _MAIN_TAIL_PID="${tail_pid}"
 
-    # Background monitor: watch for no-signal and update status
-    rm -f "${nosignal_file}"
+    # Background monitor: watch for no-signal and update status.
+    # The monitor writes its internal tail PID to monitor_tail_pid_file so we
+    # can kill it explicitly and avoid wait() deadlocking on tail -f.
+    rm -f "${nosignal_file}" "${monitor_tail_pid_file}"
     (
-      tail -n +1 -f "${FFMPEG_LOG}" 2>/dev/null | while IFS= read -r line; do
-        local short
-        short="$(echo "${line}" | tail -c 500 | tr -d '\r')"
-        write_status "running" "{\"mode\":\"live\",\"bitrate\":\"${CURRENT_BITRATE}\",\"ffmpeg\":\"$(json_escape "${short}")\"}"
+      tail -n +1 -f "${FFMPEG_LOG}" 2>/dev/null &
+      echo $! > "${monitor_tail_pid_file}"
+      wait $!
+    ) | while IFS= read -r line; do
+      local short
+      short="$(echo "${line}" | tail -c 500 | tr -d '\r')"
+      write_status "running" "{\"mode\":\"live\",\"bitrate\":\"${CURRENT_BITRATE}\",\"ffmpeg\":\"$(json_escape "${short}")\"}"
 
-        if echo "${line}" | grep -q "No input signal detected"; then
-          echo "1" >> "${nosignal_file}"
-          local cnt
-          cnt=$(wc -l < "${nosignal_file}" 2>/dev/null || echo 0)
-          log_event "WARN" "no_signal" "SDI input signal missing" "\"count\":${cnt}"
-          run_alert "no_signal" "{\"count\":${cnt}}"
-          if [[ "${cnt}" -ge "${MAX_NO_SIGNAL_LINES}" ]]; then
-            log_event "ERROR" "no_signal_restart" "Too many no-signal messages; restarting FFmpeg"
-            run_alert "no_signal_restart" "{\"count\":${cnt}}"
-            kill "${ffmpeg_pid}" 2>/dev/null || true
-            break
-          fi
+      if echo "${line}" | grep -qiE "No input signal detected|No signal|Cannot Autodetect input"; then
+        echo "1" >> "${nosignal_file}"
+        echo "0" > "${SDI_SIGNAL_FILE}"
+        local cnt
+        cnt=$(wc -l < "${nosignal_file}" 2>/dev/null || echo 0)
+        log_event "WARN" "no_signal" "SDI input signal missing" "\"count\":${cnt}"
+        run_alert "no_signal" "{\"count\":${cnt}}"
+        if [[ "${cnt}" -ge "${MAX_NO_SIGNAL_LINES}" ]]; then
+          log_event "ERROR" "no_signal_restart" "Too many no-signal messages; restarting FFmpeg"
+          run_alert "no_signal_restart" "{\"count\":${cnt}}"
+          kill "${ffmpeg_pid}" 2>/dev/null || true
+          break
         fi
-      done
-    ) &
+      else
+        # Signal recovered: if nosignal_file has content, signal was lost and is now back
+        if [[ -s "${nosignal_file}" ]]; then
+          echo "1" > "${SDI_SIGNAL_FILE}"
+        fi
+        : > "${nosignal_file}" 2>/dev/null || true
+      fi
+    done &
     monitor_pid=$!
+    _MAIN_MONITOR_PID="${monitor_pid}"
 
-    # Wait for ffmpeg to finish ??? reliable exit code
+    # Wait for ffmpeg to finish — reliable exit code
     wait "${ffmpeg_pid}" 2>/dev/null
     rc=$?
 
-    # Cleanup background processes
+    # Read the monitor's internal tail PID and kill it first, then kill the monitor.
+    # This prevents wait() deadlocking because tail -f never produces EOF on its own.
+    local _mtail_pid
+    _mtail_pid="$(cat "${monitor_tail_pid_file}" 2>/dev/null || true)"
+    _MAIN_MONITOR_TAIL_PID="${_mtail_pid}"
     kill "${tail_pid}" 2>/dev/null || true
+    kill "${_mtail_pid}" 2>/dev/null || true
     kill "${monitor_pid}" 2>/dev/null || true
     wait "${tail_pid}" 2>/dev/null || true
+    wait "${_mtail_pid}" 2>/dev/null || true
     wait "${monitor_pid}" 2>/dev/null || true
-    rm -f "${nosignal_file}"
+    rm -f "${nosignal_file}" "${monitor_tail_pid_file}"
 
   else
-    # STANDBY mode ??? same background PID pattern for reliable exit code
+    # STANDBY mode — same background PID pattern for reliable exit code
     bash -c "$(build_ffmpeg_standby_cmd)" >> "${FFMPEG_LOG}" 2>&1 &
     ffmpeg_pid=$!
+    _MAIN_FFMPEG_PID="${ffmpeg_pid}"
 
     # Tail ffmpeg log to stdout for visibility
     tail -n +1 -f "${FFMPEG_LOG}" &
     tail_pid=$!
+    _MAIN_TAIL_PID="${tail_pid}"
 
-    # Background status updater
+    # Background status updater.
+    # Same pattern: track internal tail PID to avoid wait() deadlock.
+    rm -f "${monitor_tail_pid_file}"
     (
-      tail -n +1 -f "${FFMPEG_LOG}" 2>/dev/null | while IFS= read -r line; do
-        local short
-        short="$(echo "${line}" | tail -c 500 | tr -d '\r')"
-        write_status "running" "{\"mode\":\"standby\",\"bitrate\":\"${CURRENT_BITRATE}\",\"ffmpeg\":\"$(json_escape "${short}")\"}"
-      done
-    ) &
+      tail -n +1 -f "${FFMPEG_LOG}" 2>/dev/null &
+      echo $! > "${monitor_tail_pid_file}"
+      wait $!
+    ) | while IFS= read -r line; do
+      local short
+      short="$(echo "${line}" | tail -c 500 | tr -d '\r')"
+      write_status "running" "{\"mode\":\"standby\",\"bitrate\":\"${CURRENT_BITRATE}\",\"ffmpeg\":\"$(json_escape "${short}")\"}"
+    done &
     monitor_pid=$!
+    _MAIN_MONITOR_PID="${monitor_pid}"
 
-    # Wait for ffmpeg to finish ??? reliable exit code
+    # Wait for ffmpeg to finish — reliable exit code
     wait "${ffmpeg_pid}" 2>/dev/null
     rc=$?
 
-    # Cleanup background processes
+    # Kill monitor's internal tail PID before waiting
+    local _mtail_pid
+    _mtail_pid="$(cat "${monitor_tail_pid_file}" 2>/dev/null || true)"
+    _MAIN_MONITOR_TAIL_PID="${_mtail_pid}"
     kill "${tail_pid}" 2>/dev/null || true
+    kill "${_mtail_pid}" 2>/dev/null || true
     kill "${monitor_pid}" 2>/dev/null || true
     wait "${tail_pid}" 2>/dev/null || true
+    wait "${_mtail_pid}" 2>/dev/null || true
     wait "${monitor_pid}" 2>/dev/null || true
+    rm -f "${monitor_tail_pid_file}"
   fi
   set -e
 
@@ -796,7 +922,11 @@ supervisor_loop() {
   OK_COUNT=0
   BAD_COUNT=0
 
-  MODE="standby"
+  if [[ "${ENABLE_STANDBY}" == "true" ]]; then
+    MODE="standby"
+  else
+    MODE="live"
+  fi
 
   log_event "INFO" "supervisor_start" "Supervisor loop started"
   run_alert "supervisor_start" "{}"
@@ -808,10 +938,12 @@ supervisor_loop() {
       PROBE_OK_COUNT=$((PROBE_OK_COUNT+1))
       OK_COUNT=$((OK_COUNT+1))
       BAD_COUNT=0
+      echo "1" > "${SDI_SIGNAL_FILE}"
     else
       PROBE_BAD_COUNT=$((PROBE_BAD_COUNT+1))
       BAD_COUNT=$((BAD_COUNT+1))
       OK_COUNT=0
+      echo "0" > "${SDI_SIGNAL_FILE}"
     fi
 
     if [[ "${ENABLE_STANDBY}" == "true" ]]; then
@@ -865,10 +997,27 @@ supervisor_loop() {
   done
 }
 
+wait_for_dns() {
+  local host="a.rtmp.youtube.com"
+  local max_wait=60
+  local i=0
+  log_event "INFO" "dns_wait" "Waiting for DNS to resolve ${host}"
+  while ! dscacheutil -q host -a name "${host}" 2>/dev/null | grep -q "ip_address"; do
+    i=$((i+1))
+    if [[ "${i}" -ge "${max_wait}" ]]; then
+      log_event "WARN" "dns_wait_timeout" "DNS did not resolve ${host} after ${max_wait}s; continuing anyway"
+      return 0
+    fi
+    sleep 1
+  done
+  log_event "INFO" "dns_ready" "DNS resolved ${host} after ${i}s"
+}
+
 main() {
   umask 022
   preflight
   harden_network || true
+  wait_for_dns
   supervisor_loop
 }
 
