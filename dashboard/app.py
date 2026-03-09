@@ -366,6 +366,19 @@ HTML = """<!DOCTYPE html>
     </div>
   </header>
 
+  <!-- Mobile Status Strip (hidden on desktop) -->
+  <div class="mobile-status-strip">
+    <div class="status-group">
+      <span>INGEST</span><span class="status-dot" id="dot-ingest-m"></span>
+    </div>
+    <div class="status-group">
+      <span>HUB</span><span class="status-dot ok" id="dot-hub-m"></span>
+    </div>
+    <div class="status-group">
+      <span>UPLINK</span><span class="status-dot" id="dot-uplink-m"></span>
+    </div>
+  </div>
+
   <!-- Control Bar -->
   <div class="control-bar">
     <div class="control-left">

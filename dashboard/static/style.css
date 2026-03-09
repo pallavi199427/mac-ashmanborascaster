@@ -637,6 +637,11 @@ select.key-input option { background: #1a1a2e; color: var(--text); }
   to { transform: rotate(360deg); }
 }
 
+/* ── Mobile Status Strip (hidden on desktop) ── */
+.mobile-status-strip {
+  display: none;
+}
+
 /* ── Responsive ── */
 @media (max-width: 1100px) {
   :root { --sidebar-width: 400px; }
@@ -645,11 +650,58 @@ select.key-input option { background: #1a1a2e; color: var(--text); }
   :root { --sidebar-width: 360px; }
 }
 @media (max-width: 768px) {
+  /* Allow page to scroll vertically on mobile */
+  html, body { overflow: auto; }
+
   .main-content {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr;
   }
   .left-panel { min-height: 300px; }
-  .right-sidebar { overflow-y: visible; }
+  .right-sidebar { overflow-y: visible; padding: 0 12px 12px; }
   .header-center { display: none; }
+
+  /* Mobile status strip */
+  .mobile-status-strip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 5px 16px;
+    background: rgba(10, 10, 26, 0.7);
+    border-bottom: 1px solid var(--glass-border);
+    flex-shrink: 0;
+  }
+
+  /* Header: prevent title overflowing into clock */
+  .header { padding: 10px 16px; gap: 8px; }
+  .header-left { min-width: 0; flex: 1; }
+  .header h1 { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .header-right { flex-shrink: 0; }
+
+  /* Control bar: stack vertically on mobile */
+  .control-bar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 16px;
+  }
+  .control-left { order: 1; flex-shrink: 0; }
+  .control-center { order: 2; flex: 1; min-width: 0; justify-content: center; }
+  .control-right {
+    order: 3;
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .btn-golive, .btn-stoplive {
+    padding: 10px 20px;
+    font-size: 13px;
+    flex: 1;
+    min-width: 0;
+  }
+  .btn-restart-sm {
+    padding: 10px 16px;
+    font-size: 12px;
+  }
 }

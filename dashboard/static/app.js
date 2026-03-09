@@ -426,28 +426,25 @@ function updatePlaybackEmbed(running) {
 function updateStatusDots(m, running) {
   const dotIngest = document.getElementById('dot-ingest');
   const dotUplink = document.getElementById('dot-uplink');
+  const dotIngestM = document.getElementById('dot-ingest-m');
+  const dotUplinkM = document.getElementById('dot-uplink-m');
 
-  if (dotIngest) {
-    if (!running) {
-      dotIngest.className = 'status-dot';
-    } else if (m.sdi_signal === 1) {
-      dotIngest.className = 'status-dot ok';
-    } else {
-      dotIngest.className = 'status-dot err';
-    }
-  }
+  const ingestCls = !running ? 'status-dot' : (m.sdi_signal === 1 ? 'status-dot ok' : 'status-dot err');
+  if (dotIngest) dotIngest.className = ingestCls;
+  if (dotIngestM) dotIngestM.className = ingestCls;
 
-  if (dotUplink) {
-    const ping = m.network && m.network.ping;
-    if (!running) {
-      dotUplink.className = 'status-dot';
-    } else if (ping && typeof ping === 'object' && ping.loss != null) {
-      const loss = parseFloat(ping.loss);
-      dotUplink.className = 'status-dot ' + (loss === 0 ? 'ok' : loss < 5 ? 'warn' : 'err');
-    } else {
-      dotUplink.className = 'status-dot warn';
-    }
+  const ping = m.network && m.network.ping;
+  let uplinkCls;
+  if (!running) {
+    uplinkCls = 'status-dot';
+  } else if (ping && typeof ping === 'object' && ping.loss != null) {
+    const loss = parseFloat(ping.loss);
+    uplinkCls = 'status-dot ' + (loss === 0 ? 'ok' : loss < 5 ? 'warn' : 'err');
+  } else {
+    uplinkCls = 'status-dot warn';
   }
+  if (dotUplink) dotUplink.className = uplinkCls;
+  if (dotUplinkM) dotUplinkM.className = uplinkCls;
 }
 
 function updateNetwork(m, running) {
@@ -630,8 +627,11 @@ function setConn(ok) {
   const dot = document.getElementById('conn');
   if (dot) dot.className = 'conn-dot ' + (ok ? 'ok' : 'err');
 
+  const hubCls = 'status-dot ' + (ok ? 'ok' : 'err');
   const hubDot = document.getElementById('dot-hub');
-  if (hubDot) hubDot.className = 'status-dot ' + (ok ? 'ok' : 'err');
+  if (hubDot) hubDot.className = hubCls;
+  const hubDotM = document.getElementById('dot-hub-m');
+  if (hubDotM) hubDotM.className = hubCls;
 }
 
 function fmtUptime(s) {
