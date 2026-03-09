@@ -24,43 +24,51 @@ echo "[..] Detecting Ethernet interface..."
 IFACE=""
 SERVICE_NAME=""
 
-# Walk all hardware ports; find the first Ethernet-type port that has a link
+# Walk all hardware ports; find a WIRED Ethernet port that is active.
+# Explicitly skip Wi-Fi, Thunderbolt Bridge, iPhone USB, and any port
+# whose name contains "Wi-Fi" or "Wireless".
 while IFS= read -r line; do
   if [[ "${line}" =~ ^"Hardware Port:" ]]; then
     port_name="${line#Hardware Port: }"
+    dev=""
   elif [[ "${line}" =~ ^"Device:" ]]; then
     dev="${line#Device: }"
   elif [[ "${line}" =~ ^"Ethernet Address:" ]]; then
-    # Check if interface is up and has a carrier
-    if [[ -n "${dev:-}" ]] && /sbin/ifconfig "${dev}" 2>/dev/null | grep -q "status: active"; then
+    [[ -z "${dev:-}" ]] && continue
+
+    # Skip known wireless / virtual port types
+    if echo "${port_name}" | grep -qiE "wi-?fi|wireless|thunderbolt bridge|iphone|bluetooth"; then
+      continue
+    fi
+
+    # Skip the Wi-Fi device (en0 on most Macs) by checking mediatype
+    if /sbin/ifconfig "${dev}" 2>/dev/null | grep -q "type: Wi-Fi"; then
+      continue
+    fi
+
+    # Must be active (link up)
+    if /sbin/ifconfig "${dev}" 2>/dev/null | grep -q "status: active"; then
       IFACE="${dev}"
-      SERVICE_NAME="${port_name:-}"
+      SERVICE_NAME="${port_name}"
       break
     fi
   fi
 done < <(/usr/sbin/networksetup -listallhardwareports 2>/dev/null)
 
-# Fallback: first en* interface that is up and not loopback/Wi-Fi
 if [[ -z "${IFACE}" ]]; then
-  for dev in $(/sbin/ifconfig -l 2>/dev/null); do
-    [[ "${dev}" == lo* ]] && continue
-    [[ "${dev}" == en0 ]] && continue   # en0 is usually Wi-Fi on Mac Mini
-    if /sbin/ifconfig "${dev}" 2>/dev/null | grep -q "status: active"; then
-      IFACE="${dev}"
-      # Try to get service name from networksetup
-      SERVICE_NAME="$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
-        | awk -v dev="${dev}" '/^Hardware Port:/{name=substr($0,17)} /^Device: /{ if ($2==dev) {print name; exit}}')" || true
-      break
-    fi
-  done
-fi
-
-if [[ -z "${IFACE}" ]]; then
-  echo "[WARN] Could not auto-detect active Ethernet interface."
-  echo "       Available interfaces:"
-  /sbin/ifconfig -l
-  read -r -p "       Enter interface name manually (e.g. en1): " IFACE
-  SERVICE_NAME=""
+  echo "[WARN] Could not auto-detect an active wired Ethernet interface."
+  echo
+  echo "       All hardware ports found:"
+  /usr/sbin/networksetup -listallhardwareports 2>/dev/null | grep -E "^Hardware Port:|^Device:|^Ethernet" | sed 's/^/         /'
+  echo
+  read -r -p "       Enter the Network Service name from above (e.g. USB 10/100/1000 LAN): " SERVICE_NAME
+  # Resolve device name from service name
+  IFACE="$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
+    | awk -v svc="${SERVICE_NAME}" '/^Hardware Port:/{found=($0 ~ svc)} found && /^Device:/{print $2; exit}')" || true
+  if [[ -z "${IFACE}" ]]; then
+    echo "[ERROR] Could not resolve interface for \"${SERVICE_NAME}\". Aborting."
+    exit 1
+  fi
 fi
 
 # If we still don't have a service name, resolve it
