@@ -74,20 +74,27 @@ echo "[OK] Installed ${INSTALL_BIN}/yt_dashboard_helper.sh"
 
 # Install sudoers entry
 cat > "${SUDOERS_FILE}" <<'SUDOERS'
-# YT SDI Streamer Dashboard — allow unprivileged dashboard to control the service
-ALL ALL=(root) NOPASSWD: /usr/local/bin/ytctl start
-ALL ALL=(root) NOPASSWD: /usr/local/bin/ytctl stop
-ALL ALL=(root) NOPASSWD: /usr/local/bin/ytctl restart
-ALL ALL=(root) NOPASSWD: /usr/local/bin/ytctl status
+# YT SDI Streamer Dashboard — allow unprivileged dashboard to control services
+# ytctl multi-service commands
+ALL ALL=(root) NOPASSWD: /usr/local/bin/ytctl *
+# Dashboard helper
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-key
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-key *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-bitrate
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-bitrate *
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-resolution
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-resolution *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-playback-url
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-playback-url *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-profiles
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-profile *
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh switch-profile *
+# launchctl for all services
 ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-sdi-streamer
+ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-ingest
+ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-bridge
+ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.mediamtx
+ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-dashboard
 SUDOERS
 chmod 440 "${SUDOERS_FILE}"
 chown root:wheel "${SUDOERS_FILE}"

@@ -1,7 +1,8 @@
-/* ── ASHMAN Broadcast Dashboard — Multi-Profile ── */
+/* ── ASHMAN Broadcast Dashboard — Multi-Profile + WebRTC Preview ── */
 
 const POLL_MS = 3000;
 const EVENTS_POLL_MS = 10000;
+const PIPELINE_POLL_MS = 5000;
 let actionInProgress = false;
 let lastServiceState = null;
 let prevNet = null;
@@ -10,6 +11,261 @@ let txHistory = [];
 let profilesData = null; // { active: 'profile1', profiles: { ... } }
 let openEditPanel = null;
 let revealedKeys = {}; // profileId -> true/false
+let pipelineData = null; // { ingest: {running, metrics}, bridge: {running, status}, uplink: {running, metrics}, mediamtx: {running} }
+
+/* ── WebRTC WHEP Player ── */
+let whepPc = null;
+let whepRetryTimer = null;
+let whepDisconnectTimer = null;
+let audioCtx = null;
+let audioAnalyser = null;
+let audioSource = null;
+let vuAnimFrame = null;
+let isMuted = true;
+const WHEP_URL = window.location.protocol + '//' + window.location.hostname + ':8889/stream/whep';
+
+async function startWhepPlayer() {
+  stopWhepPlayer();
+
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+    whepPc = pc;
+
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+
+    pc.ontrack = function(event) {
+      console.log('[WHEP] ontrack: kind=' + event.track.kind + ' readyState=' + event.track.readyState);
+      const video = document.getElementById('previewVideo');
+      if (video && event.streams && event.streams[0]) {
+        video.srcObject = event.streams[0];
+        video.play().catch(function() {});
+        const overlay = document.getElementById('previewOverlay');
+        if (overlay) overlay.style.display = 'none';
+        // Only set up audio meter when we receive the audio track
+        if (event.track.kind === 'audio') {
+          var stream = event.streams[0];
+          var audioTracks = stream.getAudioTracks();
+          console.log('[WHEP] Audio tracks: ' + audioTracks.length + ', enabled=' + (audioTracks[0] ? audioTracks[0].enabled : 'N/A'));
+          setupAudioMeter(stream);
+        }
+      }
+    };
+
+    pc.oniceconnectionstatechange = function() {
+      var state = pc.iceConnectionState;
+      if (state === 'failed' || state === 'closed') {
+        if (whepDisconnectTimer) { clearTimeout(whepDisconnectTimer); whepDisconnectTimer = null; }
+        scheduleWhepRetry();
+      } else if (state === 'disconnected') {
+        // Grace period: disconnected is transient and often self-recovers
+        if (!whepDisconnectTimer) {
+          whepDisconnectTimer = setTimeout(function() {
+            whepDisconnectTimer = null;
+            if (whepPc && whepPc.iceConnectionState !== 'connected' && whepPc.iceConnectionState !== 'completed') {
+              scheduleWhepRetry();
+            }
+          }, 3000);
+        }
+      } else if (state === 'connected' || state === 'completed') {
+        if (whepDisconnectTimer) { clearTimeout(whepDisconnectTimer); whepDisconnectTimer = null; }
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const res = await fetch(WHEP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: pc.localDescription.sdp
+    });
+
+    if (!res.ok) {
+      throw new Error('WHEP ' + res.status);
+    }
+
+    const answerSdp = await res.text();
+    await pc.setRemoteDescription(new RTCSessionDescription({
+      type: 'answer',
+      sdp: answerSdp
+    }));
+  } catch (e) {
+    console.log('[WHEP] Connection failed:', e.message);
+    scheduleWhepRetry();
+  }
+}
+
+function stopWhepPlayer() {
+  if (whepRetryTimer) { clearTimeout(whepRetryTimer); whepRetryTimer = null; }
+  if (whepDisconnectTimer) { clearTimeout(whepDisconnectTimer); whepDisconnectTimer = null; }
+  if (vuAnimFrame) { cancelAnimationFrame(vuAnimFrame); vuAnimFrame = null; }
+  if (audioSource) { audioSource.disconnect(); audioSource = null; }
+  if (audioAnalyser) { audioAnalyser = null; }
+  if (audioCtx) { audioCtx.close().catch(function() {}); audioCtx = null; }
+  pendingAudioStream = null;
+  if (whepPc) { whepPc.close(); whepPc = null; }
+  const video = document.getElementById('previewVideo');
+  if (video) video.srcObject = null;
+  const overlay = document.getElementById('previewOverlay');
+  if (overlay) overlay.style.display = '';
+  resetVuMeter();
+}
+
+function scheduleWhepRetry() {
+  if (whepRetryTimer) return;
+  whepRetryTimer = setTimeout(function() {
+    whepRetryTimer = null;
+    startWhepPlayer();
+  }, 5000);
+}
+
+/* ── Audio VU Meter ── */
+let pendingAudioStream = null;
+
+let vuDebugCounter = 0;
+
+function setupAudioMeter(stream) {
+  pendingAudioStream = stream;
+  // Create AudioContext eagerly — it may start suspended, that's OK
+  // The analyser will be connected and ready for when context resumes on click
+  initAudioContext(stream);
+  if (!vuAnimFrame) updateVuMeter();
+}
+
+function initAudioContext(stream) {
+  if (!stream) return;
+  if (audioSource) { audioSource.disconnect(); audioSource = null; }
+  if (audioCtx) { audioCtx.close().catch(function() {}); audioCtx = null; }
+  audioAnalyser = null;
+
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    audioCtx = ctx;
+    audioSource = ctx.createMediaStreamSource(stream);
+    audioAnalyser = ctx.createAnalyser();
+    audioAnalyser.fftSize = 2048;
+    audioAnalyser.smoothingTimeConstant = 0.3;
+    audioSource.connect(audioAnalyser);
+    // Do NOT connect to ctx.destination — we don't want to double-play audio
+    console.log('[Audio] AudioContext created, state=' + ctx.state);
+
+    ctx.onstatechange = function() {
+      console.log('[Audio] AudioContext state changed to: ' + ctx.state);
+    };
+
+    if (ctx.state === 'suspended') {
+      console.log('[Audio] Context suspended — will resume on first user click');
+      ctx.resume().catch(function() {});
+    }
+  } catch(e) {
+    console.log('[Audio] Failed to create AudioContext:', e);
+  }
+}
+
+// Resume AudioContext on any user click (browser autoplay policy)
+document.addEventListener('click', function resumeAudio() {
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume().then(function() {
+      console.log('[Audio] Resumed on click, state=' + audioCtx.state);
+    });
+  }
+  // If context was destroyed (e.g. after reconnect) but stream exists, recreate
+  if (pendingAudioStream && !audioCtx) {
+    console.log('[Audio] Recreating AudioContext on user gesture');
+    initAudioContext(pendingAudioStream);
+  }
+}, { once: false });
+
+function updateVuMeter() {
+  if (!audioAnalyser || !audioCtx || audioCtx.state !== 'running') {
+    // Keep polling — will start working once AudioContext resumes
+    vuAnimFrame = requestAnimationFrame(updateVuMeter);
+    return;
+  }
+
+  // Use time-domain data (raw waveform) — much more reliable than frequency data
+  // for VU metering, especially with WebRTC audio streams
+  var bufLen = audioAnalyser.fftSize;
+  var dataArray = new Uint8Array(bufLen);
+  audioAnalyser.getByteTimeDomainData(dataArray);
+
+  // Calculate RMS from waveform: 128 = silence, deviation = signal
+  var sum = 0;
+  for (var i = 0; i < bufLen; i++) {
+    var sample = (dataArray[i] - 128) / 128.0; // normalize to -1..1
+    sum += sample * sample;
+  }
+  var rms = Math.sqrt(sum / bufLen);
+
+  // Debug logging every ~2 seconds (120 frames at 60fps)
+  vuDebugCounter++;
+  if (vuDebugCounter % 120 === 1) {
+    console.log('[Audio] VU rms=' + rms.toFixed(4) + ' ctxState=' + audioCtx.state + ' bufLen=' + bufLen);
+  }
+
+  // Convert to dB (0 dB = full scale)
+  var db = rms > 0.0001 ? 20 * Math.log10(rms) : -60;
+
+  // Map dB range to 0-100 level (-60 dB = 0%, 0 dB = 100%)
+  var level = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+
+  // Update meter bars
+  var bars = document.querySelectorAll('.vu-bar');
+  var totalBars = bars.length;
+  var activeBars = Math.round((level / 100) * totalBars);
+  for (var i = 0; i < totalBars; i++) {
+    if (i < activeBars) {
+      bars[i].classList.add('active');
+    } else {
+      bars[i].classList.remove('active');
+    }
+  }
+
+  // Update dB display
+  var dbEl = document.getElementById('vuDb');
+  if (dbEl) {
+    if (db > -59) {
+      dbEl.textContent = Math.round(db) + ' dB';
+    } else {
+      dbEl.textContent = '-\u221E dB';
+    }
+  }
+
+  vuAnimFrame = requestAnimationFrame(updateVuMeter);
+}
+
+function resetVuMeter() {
+  var bars = document.querySelectorAll('.vu-bar');
+  for (var i = 0; i < bars.length; i++) {
+    bars[i].classList.remove('active');
+  }
+  var dbEl = document.getElementById('vuDb');
+  if (dbEl) dbEl.textContent = '-\u221E dB';
+}
+
+function toggleMute() {
+  var video = document.getElementById('previewVideo');
+  var btn = document.getElementById('muteBtn');
+  if (!video || !btn) return;
+
+  // Create AudioContext on this user gesture if not yet created
+  if (!audioCtx && pendingAudioStream) {
+    console.log('[Audio] Creating AudioContext from mute toggle');
+    initAudioContext(pendingAudioStream);
+  } else if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+
+  isMuted = !isMuted;
+  video.muted = isMuted;
+  btn.innerHTML = isMuted
+    ? '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+  btn.title = isMuted ? 'Unmute audio' : 'Mute audio';
+}
 
 /* ── Clock ── */
 
@@ -278,6 +534,72 @@ function toggleReveal(id) {
   }
 }
 
+/* ── Pipeline Polling ── */
+
+async function fetchPipeline() {
+  try {
+    const res = await fetch('/api/pipeline');
+    if (!res.ok) return;
+    pipelineData = await res.json();
+    updatePipelineDots();
+  } catch { /* silent */ }
+}
+
+function updatePipelineDots() {
+  if (!pipelineData) return;
+
+  // Ingest dot: green if running, grey if stopped
+  const ingest = pipelineData.ingest || {};
+  const ingestMetrics = ingest.metrics || {};
+  let ingestCls = 'status-dot';
+  if (ingest.running) {
+    ingestCls = 'status-dot ok';
+  }
+  ['dot-ingest', 'dot-ingest-m'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.className = ingestCls;
+  });
+
+  // Bridge dot (HUB): green if bridge + mediamtx running
+  const bridge = pipelineData.bridge || {};
+  const mediamtx = pipelineData.mediamtx || {};
+  let hubCls = 'status-dot';
+  if (bridge.running && mediamtx.running) {
+    hubCls = 'status-dot ok';
+  } else if (bridge.running || mediamtx.running) {
+    hubCls = 'status-dot warn';
+  }
+  ['dot-hub', 'dot-hub-m'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.className = hubCls;
+  });
+
+  // Uplink dot: use network ping data from uplink metrics
+  const uplink = pipelineData.uplink || {};
+  const uplinkMetrics = uplink.metrics || {};
+  let uplinkCls = 'status-dot';
+  if (uplink.running) {
+    const ping = uplinkMetrics.network && uplinkMetrics.network.ping;
+    if (ping && typeof ping === 'object' && ping.loss != null) {
+      const loss = parseFloat(ping.loss);
+      uplinkCls = 'status-dot ' + (loss === 0 ? 'ok' : loss < 5 ? 'warn' : 'err');
+    } else {
+      uplinkCls = 'status-dot warn';
+    }
+  }
+  ['dot-uplink', 'dot-uplink-m'].forEach(function(id) {
+    const el = document.getElementById(id);
+    if (el) el.className = uplinkCls;
+  });
+
+  // Preview badge: update resolution from ingest metrics
+  const previewInfo = document.getElementById('previewInfo');
+  if (previewInfo && ingest.running) {
+    const fmt = ingestMetrics.format || 'WebRTC';
+    previewInfo.textContent = fmt;
+  }
+}
+
 /* ── Polling ── */
 
 async function fetchMetrics() {
@@ -327,8 +649,7 @@ function updateMetrics(m) {
   const previewLive = document.getElementById('previewLive');
   if (previewLive) previewLive.style.display = running ? 'inline' : 'none';
 
-  // Header status dots
-  updateStatusDots(m, running);
+  // Pipeline status dots are now handled by fetchPipeline(), not here
 
   // Uptime in control bar
   const uptimeEl = document.getElementById('s-uptime');
@@ -423,29 +744,7 @@ function updatePlaybackEmbed(running) {
   if (embedDiv) { embedDiv.style.display = 'none'; embedDiv.innerHTML = ''; }
 }
 
-function updateStatusDots(m, running) {
-  const dotIngest = document.getElementById('dot-ingest');
-  const dotUplink = document.getElementById('dot-uplink');
-  const dotIngestM = document.getElementById('dot-ingest-m');
-  const dotUplinkM = document.getElementById('dot-uplink-m');
-
-  const ingestCls = !running ? 'status-dot' : (m.sdi_signal === 1 ? 'status-dot ok' : 'status-dot err');
-  if (dotIngest) dotIngest.className = ingestCls;
-  if (dotIngestM) dotIngestM.className = ingestCls;
-
-  const ping = m.network && m.network.ping;
-  let uplinkCls;
-  if (!running) {
-    uplinkCls = 'status-dot';
-  } else if (ping && typeof ping === 'object' && ping.loss != null) {
-    const loss = parseFloat(ping.loss);
-    uplinkCls = 'status-dot ' + (loss === 0 ? 'ok' : loss < 5 ? 'warn' : 'err');
-  } else {
-    uplinkCls = 'status-dot warn';
-  }
-  if (dotUplink) dotUplink.className = uplinkCls;
-  if (dotUplinkM) dotUplinkM.className = uplinkCls;
-}
+// updateStatusDots is now replaced by updatePipelineDots() via fetchPipeline()
 
 function updateNetwork(m, running) {
   const n = m.network || {};
@@ -598,7 +897,7 @@ async function executeAction(action) {
     const res = await fetch('/api/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action })
+      body: JSON.stringify({ action, service: 'uplink' })
     });
     const data = await res.json();
     showToast(
@@ -699,6 +998,11 @@ document.addEventListener('DOMContentLoaded', () => {
   loadProfiles();
   fetchMetrics();
   fetchEvents();
+  fetchPipeline();
   setInterval(fetchMetrics, POLL_MS);
   setInterval(fetchEvents, EVENTS_POLL_MS);
+  setInterval(fetchPipeline, PIPELINE_POLL_MS);
+
+  // Start WebRTC preview player
+  startWhepPlayer();
 });

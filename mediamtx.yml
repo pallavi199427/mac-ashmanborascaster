@@ -1,0 +1,19 @@
+###############################################
+# MediaMTX - YT Appliance WebRTC Preview
+###############################################
+
+logLevel: info
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+# Disable automatic interface scanning to prevent loopback (127.0.0.1)
+# candidates. The startup wrapper injects the real IP via webrtcAdditionalHosts.
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: []
+webrtcICEServers2:
+  - url: stun:stun.l.google.com:19302
+
+paths:
+  stream:
+    # Fed by yt_bridge.sh via RTSP push

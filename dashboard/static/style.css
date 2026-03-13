@@ -279,8 +279,14 @@ body::after {
   justify-content: center;
   position: relative;
   min-height: 0;
+  background: #000;
 }
-
+.preview-content video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
 
 .preview-overlay {
   position: absolute; inset: 0;
@@ -290,6 +296,65 @@ body::after {
   font-weight: 500; letter-spacing: 1px;
   text-transform: uppercase;
   pointer-events: none;
+}
+
+/* ── Audio VU Meter ── */
+.vu-meter {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  z-index: 10;
+}
+.vu-mute-btn {
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0;
+  flex-shrink: 0;
+}
+.vu-mute-btn svg { width: 16px; height: 16px; }
+.vu-mute-btn:hover { background: rgba(255, 255, 255, 0.15); color: var(--text); }
+.vu-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 20px;
+}
+.vu-bar {
+  width: 4px;
+  height: 100%;
+  border-radius: 1px;
+  opacity: 0.25;
+  transition: opacity 0.08s;
+}
+.vu-bar.green { background: var(--green); }
+.vu-bar.amber { background: var(--amber); }
+.vu-bar.red { background: var(--red); }
+.vu-bar.active { opacity: 1; }
+.vu-bar.active.green { box-shadow: 0 0 4px var(--green); }
+.vu-bar.active.amber { box-shadow: 0 0 4px var(--amber); }
+.vu-bar.active.red { box-shadow: 0 0 4px var(--red); }
+.vu-db {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  min-width: 42px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .playback-area {

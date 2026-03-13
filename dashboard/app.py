@@ -19,6 +19,10 @@ from flask import Flask, jsonify, render_template_string, request
 METRICS_PATH = "/var/log/yt-sdi-streamer/metrics.json"
 STATUS_PATH = "/var/log/yt-sdi-streamer/status.json"
 EVENTS_PATH = "/var/log/yt-sdi-streamer/events.jsonl"
+INGEST_METRICS_PATH = "/var/log/yt-sdi-streamer/ingest_metrics.json"
+INGEST_STATUS_PATH = "/var/log/yt-sdi-streamer/ingest_status.json"
+INGEST_EVENTS_PATH = "/var/log/yt-sdi-streamer/ingest_events.jsonl"
+BRIDGE_STATUS_PATH = "/var/log/yt-sdi-streamer/bridge_status.json"
 YTCTL_PATH = "/usr/local/bin/ytctl"
 HELPER_PATH = "/usr/local/bin/yt_dashboard_helper.sh"
 DASHBOARD_PORT = 8080
@@ -93,26 +97,35 @@ def run_sudo(cmd, timeout=30):
         return False, str(e)
 
 
-LAUNCHD_LABEL = "com.kalaignar.yt-sdi-streamer"
+LAUNCHD_LABELS = {
+    "uplink": "com.kalaignar.yt-sdi-streamer",
+    "ingest": "com.kalaignar.yt-ingest",
+    "bridge": "com.kalaignar.yt-bridge",
+    "mediamtx": "com.kalaignar.mediamtx",
+}
+# Keep backwards compat
+LAUNCHD_LABEL = LAUNCHD_LABELS["uplink"]
 SERVICE_CACHE_TTL = 5  # seconds
 
-_service_cache = {"running": False, "checked_at": 0.0}
+_service_cache = {}  # label -> {"running": bool, "checked_at": float}
 
-def is_service_running():
-    """Check if the streamer LaunchDaemon is loaded and running (cached for 5s)."""
+def is_service_running(label=None):
+    """Check if a LaunchDaemon is loaded and running (cached for 5s)."""
+    if label is None:
+        label = LAUNCHD_LABEL
     now = time.monotonic()
-    if now - _service_cache["checked_at"] < SERVICE_CACHE_TTL:
-        return _service_cache["running"]
+    cached = _service_cache.get(label, {"running": False, "checked_at": 0.0})
+    if now - cached["checked_at"] < SERVICE_CACHE_TTL:
+        return cached["running"]
     try:
         result = subprocess.run(
-            ["sudo", "launchctl", "print", f"system/{LAUNCHD_LABEL}"],
+            ["sudo", "launchctl", "print", f"system/{label}"],
             capture_output=True, text=True, timeout=5
         )
         running = result.returncode == 0
     except Exception:
         running = False
-    _service_cache["running"] = running
-    _service_cache["checked_at"] = now
+    _service_cache[label] = {"running": running, "checked_at": now}
     return running
 
 
@@ -148,6 +161,69 @@ def api_events():
         except json.JSONDecodeError:
             continue
     return jsonify(events)
+
+
+@app.route("/api/pipeline")
+def api_pipeline():
+    """Return status of all pipeline services."""
+    pipeline = {}
+    for svc, label in LAUNCHD_LABELS.items():
+        pipeline[svc] = {"running": is_service_running(label)}
+    # Add ingest metrics if available
+    ingest_metrics = read_json_file(INGEST_METRICS_PATH)
+    if ingest_metrics:
+        pipeline["ingest"]["metrics"] = ingest_metrics
+    # Add bridge status if available
+    bridge_status = read_json_file(BRIDGE_STATUS_PATH)
+    if bridge_status:
+        pipeline["bridge"]["status"] = bridge_status
+    # Add uplink metrics if available
+    uplink_metrics = read_json_file(METRICS_PATH)
+    if uplink_metrics:
+        pipeline["uplink"]["metrics"] = uplink_metrics
+    return jsonify(pipeline)
+
+
+@app.route("/api/ingest/metrics")
+def api_ingest_metrics():
+    data = read_json_file(INGEST_METRICS_PATH)
+    running = is_service_running(LAUNCHD_LABELS["ingest"])
+    if data is None:
+        return jsonify({"error": "No ingest metrics available", "service_running": running}), 503
+    data["service_running"] = running
+    return jsonify(data)
+
+
+@app.route("/api/ingest/status")
+def api_ingest_status():
+    data = read_json_file(INGEST_STATUS_PATH)
+    if data is None:
+        return jsonify({"error": "No ingest status available"}), 503
+    return jsonify(data)
+
+
+@app.route("/api/ingest/events")
+def api_ingest_events():
+    n = request.args.get("n", 50, type=int)
+    n = min(max(n, 1), 500)
+    lines = read_last_lines(INGEST_EVENTS_PATH, n)
+    events = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return jsonify(events)
+
+
+@app.route("/api/bridge/status")
+def api_bridge_status():
+    data = read_json_file(BRIDGE_STATUS_PATH)
+    running = is_service_running(LAUNCHD_LABELS["bridge"])
+    if data is None:
+        return jsonify({"error": "No bridge status available", "service_running": running}), 503
+    data["service_running"] = running
+    return jsonify(data)
 
 
 @app.route("/api/stream-key", methods=["GET"])
@@ -261,7 +337,10 @@ def api_control():
     action = data["action"]
     if action not in ("start", "stop", "restart"):
         return jsonify({"error": "Invalid action. Use start, stop, or restart."}), 400
-    ok, output = run_sudo([YTCTL_PATH, action])
+    service = data.get("service", "all")
+    if service not in ("all", "ingest", "bridge", "mediamtx", "uplink", "dashboard"):
+        return jsonify({"error": "Invalid service"}), 400
+    ok, output = run_sudo([YTCTL_PATH, service, action])
     if not ok:
         return jsonify({"ok": False, "error": output}), 500
     return jsonify({"ok": True, "output": output})
@@ -400,16 +479,41 @@ HTML = """<!DOCTYPE html>
 
     <!-- Left Panel -->
     <div class="left-panel">
-      <!-- Input Preview -->
+      <!-- Input Preview (WebRTC via MediaMTX WHEP) -->
       <div class="preview-area">
         <div class="preview-header">
-          <span>INPUT - SDI Signal</span>
+          <span>INPUT PREVIEW</span>
           <div class="preview-badge">
-            <span class="preview-info" id="previewInfo">1920x1080</span>
+            <span class="preview-info" id="previewInfo">WebRTC</span>
             <span class="badge-live" id="previewLive" style="display:none">LIVE</span>
           </div>
         </div>
-        <div class="preview-content"></div>
+        <div class="preview-content">
+          <video id="previewVideo" autoplay muted playsinline></video>
+          <div class="preview-overlay" id="previewOverlay">NO PREVIEW</div>
+          <!-- Audio VU Meter -->
+          <div class="vu-meter" id="vuMeter">
+            <button class="vu-mute-btn" id="muteBtn" title="Unmute audio" onclick="toggleMute()">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+            </button>
+            <div class="vu-bars">
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar green"></div>
+              <div class="vu-bar amber"></div>
+              <div class="vu-bar amber"></div>
+              <div class="vu-bar amber"></div>
+              <div class="vu-bar red"></div>
+              <div class="vu-bar red"></div>
+            </div>
+            <span class="vu-db" id="vuDb">-&infin; dB</span>
+          </div>
+        </div>
       </div>
       <!-- Playback Embed -->
       <div class="playback-area">

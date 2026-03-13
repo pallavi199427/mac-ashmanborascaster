@@ -2,15 +2,17 @@
 set -euo pipefail
 
 ###############################################################################
-# yt_sdi_streamer.sh ??? Appliance-grade SDI -> YouTube streamer for macOS
+# yt_sdi_streamer.sh — Uplink: Multicast → YouTube RTMP
 #
-# Core:
-# - Live/Standby auto switching (standby slate w/ logo + clock)
-# - Drift protection (aresample async)
-# - Timestamp resilience (+genpts + wallclock timestamps)
+# Reads the MPEG-TS multicast stream from the ingest process and sends it
+# to YouTube via RTMP. By default remuxes (copy), optionally re-encodes
+# when UPLINK_REENCODE=true.
+#
+# Features:
+# - Remux or re-encode to RTMP
+# - Bitrate ladder: MAX → SAFE after repeated failures
 # - Output-stall watchdog (monitors ffmpeg -progress)
 # - Auto restart with exponential backoff
-# - Bitrate ladder: MAX -> SAFE after repeated failures
 # - Network hardening: service order, DNS, Wi-Fi off, sleep off, optional MTU
 #
 # Outputs:
@@ -21,11 +23,13 @@ set -euo pipefail
 ###############################################################################
 
 CONFIG_FILE="/etc/yt-sdi-streamer.conf"
-#CONFIG_FILE="yt-sdi-streamer.conf"
 [[ -f "${CONFIG_FILE}" ]] || { echo "Missing ${CONFIG_FILE}" >&2; exit 2; }
 
 # shellcheck disable=SC1090
 source "${CONFIG_FILE}"
+
+# ---------- Service identity ----------
+SERVICE_NAME="yt-uplink"
 
 # ---------- Paths ----------
 LOG_DIR="${LOG_DIR:-/var/log/yt-sdi-streamer}"
@@ -44,28 +48,20 @@ ALERT_SCRIPT="${ALERT_SCRIPT:-${ALERTS_DIR}/alert.sh}"
 mkdir -p "${LOG_DIR}"
 chmod 755 "${LOG_DIR}"
 
-# ---------- Singleton lock — prevent two instances fighting over decklink ----------
+# ---------- Multicast input ----------
+MULTICAST_IP="${MULTICAST_IP:-239.20.0.10}"
+MULTICAST_PORT="${MULTICAST_PORT:-5000}"
+MULTICAST_INPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=2097152&timeout=5000000"
+
+# ---------- Uplink mode ----------
+UPLINK_REENCODE="${UPLINK_REENCODE:-false}"
+
+# ---------- Singleton ----------
 LOCK_FILE="/var/run/yt-sdi-streamer.lock"
-if [[ -f "${LOCK_FILE}" ]]; then
-  OLD_PID="$(cat "${LOCK_FILE}" 2>/dev/null || true)"
-  if [[ -n "${OLD_PID}" ]] && kill -0 "${OLD_PID}" 2>/dev/null; then
-    echo "Killing previous instance (PID ${OLD_PID}) and its children..." >&2
-    kill -TERM -- -"${OLD_PID}" 2>/dev/null || kill -TERM "${OLD_PID}" 2>/dev/null || true
-    sleep 1
-    kill -KILL -- -"${OLD_PID}" 2>/dev/null || kill -KILL "${OLD_PID}" 2>/dev/null || true
-    sleep 0.5
-  fi
-  # Also kill any orphan yt_sdi_streamer processes from previous runs (except us)
-  for _opid in $(/usr/bin/pgrep -f "yt_sdi_streamer.sh" 2>/dev/null || true); do
-    [[ "${_opid}" == "$$" ]] && continue
-    kill -KILL "${_opid}" 2>/dev/null || true
-  done
-  sleep 0.5
-fi
-echo $$ > "${LOCK_FILE}"
+LOCK_PGREP_PATTERN="yt_sdi_streamer.sh"
 
 # ---------- Runtime state ----------
-MODE="standby" # live|standby
+MODE="live"  # uplink is always "live" (no standby concept)
 CURRENT_BITRATE=""
 CURRENT_BUFSIZE=""
 RTMP_ENDPOINT=""
@@ -78,12 +74,10 @@ LAST_EXIT_RC=0
 CONSEC_FAILS=0
 BACKOFF=0
 
-# SDI probe counters (for UX + tuning)
+# SDI probe not used by uplink, but set for common code compatibility
 PROBE_OK_COUNT=0
 PROBE_BAD_COUNT=0
-SDI_SIGNAL_STATE=-1  # -1=unknown, 0=no signal, 1=signal present
-
-# Hysteresis counters
+SDI_SIGNAL_STATE=-1
 OK_COUNT=0
 BAD_COUNT=0
 
@@ -111,179 +105,25 @@ NET_PING_LOSS=""
 NET_PING_AVG_MS=""
 NET_PING_JITTER_MS=""
 
-# ---------- Global child PIDs for cleanup trap ----------
-_CLEANUP_DONE=0
-_MAIN_FFMPEG_PID=""
-_MAIN_TAIL_PID=""
-_MAIN_MONITOR_PID=""
-_MAIN_METRICS_PID=""
-_MAIN_STALL_PID=""
-_MAIN_MONITOR_TAIL_PID=""
+# ---------- Source shared library ----------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/yt_common.sh"
 
-_cleanup() {
-  [[ "${_CLEANUP_DONE}" == "1" ]] && return
-  _CLEANUP_DONE=1
-  trap '' SIGTERM SIGINT EXIT
-  declare -f kill_running_ffmpeg >/dev/null 2>&1 && kill_running_ffmpeg 2>/dev/null || true
-  # Kill all known child PIDs
-  local _p
-  for _p in "${_MAIN_FFMPEG_PID}" "${_MAIN_TAIL_PID}" "${_MAIN_MONITOR_TAIL_PID}" \
-             "${_MAIN_MONITOR_PID}" "${_MAIN_METRICS_PID}" "${_MAIN_STALL_PID}"; do
-    [[ -n "${_p}" ]] && kill "${_p}" 2>/dev/null || true
-  done
-  sleep 0.3
-  for _p in "${_MAIN_FFMPEG_PID}" "${_MAIN_TAIL_PID}" "${_MAIN_MONITOR_TAIL_PID}" \
-             "${_MAIN_MONITOR_PID}" "${_MAIN_METRICS_PID}" "${_MAIN_STALL_PID}"; do
-    [[ -n "${_p}" ]] && kill -KILL "${_p}" 2>/dev/null || true
-  done
-  # Kill entire process group to catch any orphaned children
-  kill -TERM -- -$$ 2>/dev/null || true
-  sleep 0.2
-  kill -KILL -- -$$ 2>/dev/null || true
-  rm -f "${LOCK_FILE}" 2>/dev/null || true
-}
-trap '_cleanup' SIGTERM SIGINT EXIT
+acquire_lock
+install_cleanup_trap
 
-# ---------- Helpers ----------
-ts_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-
-json_escape() {
-  local s="${1}"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  s="${s//$'\n'/\\n}"
-  s="${s//$'\r'/\\r}"
-  s="${s//$'\t'/\\t}"
-  printf '%s' "${s}"
-}
-
+# ---------- RTMP helper ----------
 safe_endpoint() {
-  # never log stream key
   echo "${YOUTUBE_RTMP_URL}/(redacted)"
 }
 
-atomic_write() {
-  local path="$1"
-  local tmp="${path}.tmp"
-  cat > "${tmp}"
-  mv "${tmp}" "${path}"
-}
-
-log_event() {
-  local level="$1"; shift
-  local event="$1"; shift
-  local message="$1"; shift
-  local extra="${1:-}"
-
-  local t msg line
-  t="$(ts_utc)"
-  msg="$(json_escape "${message}")"
-
-  line="{\"ts\":\"${t}\",\"level\":\"${level}\",\"event\":\"${event}\",\"message\":\"${msg}\",\"service\":\"yt-sdi-streamer\",\"mode\":\"$(json_escape "${MODE}")\",\"device\":\"$(json_escape "${DECKLINK_DEVICE}")\",\"format\":\"$(json_escape "${FORMAT_CODE}")\",\"bitrate\":\"$(json_escape "${CURRENT_BITRATE}")\",\"endpoint\":\"$(safe_endpoint)\""
-  [[ -n "${extra}" ]] && line="${line},${extra}"
-  line="${line}}"
-
-  echo "${line}" >> "${EVENTS_LOG}"
-}
-
-write_status() {
-  local state="$1"; shift
-  local detail="${1:-{}}"
-  local t
-  t="$(ts_utc)"
-
-  atomic_write "${STATUS_JSON}" <<EOF
-{"ts":"${t}","state":"$(json_escape "${state}")","mode":"$(json_escape "${MODE}")","bitrate":"$(json_escape "${CURRENT_BITRATE}")","detail":${detail}}
-EOF
-}
-
-run_alert() {
-  local ev="$1"; shift
-  local detail="${1:-{}}"
-
-  if [[ -x "${ALERT_SCRIPT}" ]]; then
-    # shellcheck disable=SC2034
-    ALERT_TS="$(ts_utc)"
-    ALERT_EVENT="${ev}"
-    ALERT_MODE="${MODE}"
-    ALERT_BITRATE="${CURRENT_BITRATE}"
-    ALERT_DEVICE="${DECKLINK_DEVICE}"
-    ALERT_FORMAT="${FORMAT_CODE}"
-    ALERT_ENDPOINT="$(safe_endpoint)"
-    ALERT_DETAIL="${detail}"
-
-    ( "${ALERT_SCRIPT}" "${ev}" "${detail}" >> "${LOG_DIR}/alerts.log" 2>&1 ) || true
-  fi
-}
-
-require_bin() {
-  command -v "$1" >/dev/null 2>&1 || {
-    log_event "ERROR" "missing_binary" "Required binary not found: $1" "\"bin\":\"$(json_escape "$1")\""
-    run_alert "missing_binary" "{\"bin\":\"$(json_escape "$1")\"}"
-    exit 3
-  }
-}
-
-# For commands that may require root.
-SUDO=""
-init_privs() {
-  if [[ "$(id -u)" -eq 0 ]]; then
-    SUDO=""
-    return 0
-  fi
-
-  # Non-interactive sudo only.
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    SUDO="sudo -n"
-  else
-    SUDO=""
-  fi
-}
-
-run_root() {
-  if [[ "$(id -u)" -eq 0 ]]; then
-    "$@"
-    return $?
-  fi
-
-  if [[ -n "${SUDO}" ]]; then
-    ${SUDO} "$@"
-    return $?
-  fi
-
-  return 126
-}
-
-cleanup_logs_by_size() {
-  local max_events_mb="${MAX_EVENTS_LOG_MB:-200}"
-  local max_ffmpeg_mb="${MAX_FFMPEG_LOG_MB:-500}"
-
-  if [[ -f "${EVENTS_LOG}" ]]; then
-    local sz
-    sz=$(du -m "${EVENTS_LOG}" | awk '{print $1}')
-    if [[ "${sz}" -gt "${max_events_mb}" ]]; then
-      tail -n 200000 "${EVENTS_LOG}" > "${EVENTS_LOG}.tmp" && mv "${EVENTS_LOG}.tmp" "${EVENTS_LOG}"
-      log_event "WARN" "log_trim" "Trimmed events log (safety)" "\"max_mb\":${max_events_mb}"
-    fi
-  fi
-
-  if [[ -f "${FFMPEG_LOG}" ]]; then
-    local sz
-    sz=$(du -m "${FFMPEG_LOG}" | awk '{print $1}')
-    if [[ "${sz}" -gt "${max_ffmpeg_mb}" ]]; then
-      tail -n 200000 "${FFMPEG_LOG}" > "${FFMPEG_LOG}.tmp" && mv "${FFMPEG_LOG}.tmp" "${FFMPEG_LOG}"
-      log_event "WARN" "log_trim" "Trimmed ffmpeg log (safety)" "\"max_mb\":${max_ffmpeg_mb}"
-    fi
-  fi
-}
-
-# ---------- Network metrics ----------
+# ---------- Network metrics (uplink-specific) ----------
 discover_iface_for_service() {
   local info
   info="$(/usr/sbin/networksetup -getinfo "${NETWORK_SERVICE}" 2>/dev/null || true)"
   NET_IFACE="$(echo "${info}" | awk -F': ' '/Device:/{print $2; exit}' | tr -d '\r')" || true
 
-  # Fallback 1: resolve via IP from networksetup → ifconfig
   if [[ -z "${NET_IFACE}" ]]; then
     local ip
     ip="$(echo "${info}" | awk -F': ' '/^IP address:/{print $2; exit}' | tr -d '\r')" || true
@@ -293,7 +133,6 @@ discover_iface_for_service() {
     fi
   fi
 
-  # Fallback 2: resolve via Ethernet Address from networksetup → ifconfig
   if [[ -z "${NET_IFACE}" ]]; then
     local mac
     mac="$(echo "${info}" | awk -F': ' '/^Ethernet Address:/{print $2; exit}' | tr -d '\r' | tr '[:upper:]' '[:lower:]')" || true
@@ -303,7 +142,6 @@ discover_iface_for_service() {
     fi
   fi
 
-  # Fallback 3: use networksetup -listallhardwareports which always has Device line
   if [[ -z "${NET_IFACE}" ]]; then
     local svc_id
     svc_id="$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null \
@@ -421,8 +259,8 @@ refresh_network_metrics_if_due() {
   fi
 }
 
+# ---------- Uplink-specific metrics ----------
 write_metrics_snapshot() {
-  # write_metrics_snapshot STATE FFMPEG_JSON_OBJECT
   local state="$1"; shift
   local ff_detail="${1:-{}}"
 
@@ -453,150 +291,30 @@ write_metrics_snapshot() {
 EOF
 }
 
-metrics_loop() {
-  while true; do
-    sleep "${METRICS_INTERVAL}"
-
-    local out_time_ms frame fps speed enc_bitrate
-    out_time_ms="$(awk -F= '$1=="out_time_ms" {v=$2} END{print v}' "${PROGRESS_FILE}" 2>/dev/null || true)"
-    frame="$(awk -F= '$1=="frame" {v=$2} END{print v}' "${PROGRESS_FILE}" 2>/dev/null || true)"
-    fps="$(awk -F= '$1=="fps" {v=$2} END{print v}' "${PROGRESS_FILE}" 2>/dev/null || true)"
-    speed="$(awk -F= '$1=="speed" {v=$2} END{print v}' "${PROGRESS_FILE}" 2>/dev/null || true)"
-    enc_bitrate="$(awk -F= '$1=="bitrate" {v=$2} END{print v}' "${PROGRESS_FILE}" 2>/dev/null || true)"
-
-    [[ -z "${out_time_ms}" ]] && out_time_ms="0"
-    [[ -z "${frame}" ]] && frame="0"
-    [[ -z "${fps}" ]] && fps="0"
-    [[ -z "${speed}" ]] && speed="0"
-    [[ -z "${enc_bitrate}" ]] && enc_bitrate="0"
-
-    local drop dup
-    drop="$(tail -n 250 "${FFMPEG_LOG}" 2>/dev/null | grep -Eo 'drop=[0-9]+' | tail -n 1 | cut -d= -f2 || true)"
-    dup="$(tail -n 250 "${FFMPEG_LOG}" 2>/dev/null | grep -Eo 'dup=[0-9]+' | tail -n 1 | cut -d= -f2 || true)"
-    [[ -z "${drop}" ]] && drop="0"
-    [[ -z "${dup}" ]] && dup="0"
-
-    local pid
-    pid="$(/usr/bin/pgrep -n -f "${FFMPEG_BIN}.*-progress ${PROGRESS_FILE}" 2>/dev/null || true)"
-    [[ -z "${pid}" ]] && pid="0"
-
-    local ff
-    ff="{\"pid\":${pid},\"out_time_ms\":${out_time_ms},\"speed\":\"$(json_escape "${speed}")\",\"fps\":${fps},\"frame\":${frame},\"drop\":${drop},\"dup\":${dup},\"enc_bitrate\":\"$(json_escape "${enc_bitrate}")\"}"
-
-    write_metrics_snapshot "running" "${ff}"
-  done
+# ---------- FFmpeg commands ----------
+# Override kill_running_ffmpeg for uplink (kills multicast-reading ffmpeg)
+kill_running_ffmpeg() {
+  /usr/bin/pkill -TERM -f "${FFMPEG_BIN}.*-f flv" >/dev/null 2>&1 || true
+  sleep 0.5
+  /usr/bin/pkill -KILL -f "${FFMPEG_BIN}.*-f flv" >/dev/null 2>&1 || true
+  sleep 1
 }
 
-watch_output_stall() {
-  local last_ms="0"
-  local last_change
-  last_change="$(date +%s)"
-
-  while true; do
-    sleep "${STALL_CHECK_INTERVAL}"
-
-    [[ -f "${PROGRESS_FILE}" ]] || continue
-
-    local ms
-    ms="$(awk -F= '$1=="out_time_ms" {v=$2} END{print v}' "${PROGRESS_FILE}" 2>/dev/null || true)"
-    [[ -n "${ms}" ]] || continue
-
-    if [[ "${ms}" != "${last_ms}" ]]; then
-      last_ms="${ms}"
-      last_change="$(date +%s)"
-      continue
-    fi
-
-    local now stalled_for
-    now="$(date +%s)"
-    stalled_for=$(( now - last_change ))
-
-    if [[ "${stalled_for}" -ge "${STALL_TIMEOUT_SECONDS}" ]]; then
-      log_event "ERROR" "output_stalled" "Output progress stalled; restarting FFmpeg" "\"stalled_for\":${stalled_for},\"out_time_ms\":${last_ms}"
-      run_alert "output_stalled" "{\"stalled_for\":${stalled_for},\"out_time_ms\":${last_ms}}"
-      write_status "output_stalled" "{\"stalled_for\":${stalled_for},\"out_time_ms\":${last_ms}}"
-      write_metrics_snapshot "output_stalled" "{\"out_time_ms\":${last_ms},\"stalled_for\":${stalled_for}}"
-      kill_running_ffmpeg
-      exit 0
-    fi
-  done
-}
-
-probe_sdi_signal() {
-  local out probe_pid
-  local probe_out_file="${LOG_DIR}/probe_out.$$"
-
-  # Run probe in background with wall-clock timeout to prevent hanging
-  # on a stuck decklink driver (ffmpeg -t is content-duration, not wall-clock).
-  "${FFMPEG_BIN}" -hide_banner -loglevel info \
-      -f decklink -video_input "${VIDEO_INPUT}" -audio_input "${AUDIO_INPUT}" \
-      -i "${DECKLINK_DEVICE}" \
-      -t 1 -f null - >"${probe_out_file}" 2>&1 &
-  probe_pid=$!
-
-  # Wait up to 5 seconds for probe to complete
-  local i
-  for i in 1 2 3 4 5; do
-    if ! kill -0 "${probe_pid}" 2>/dev/null; then
-      break
-    fi
-    sleep 1
-  done
-
-  # If still running after 5s, force-kill it
-  if kill -0 "${probe_pid}" 2>/dev/null; then
-    kill -KILL "${probe_pid}" 2>/dev/null || true
-    wait "${probe_pid}" 2>/dev/null || true
-    rm -f "${probe_out_file}"
-    return 1
-  fi
-
-  wait "${probe_pid}" 2>/dev/null || true
-  out="$(cat "${probe_out_file}" 2>/dev/null || true)"
-  rm -f "${probe_out_file}"
-
-  if echo "${out}" | grep -qiE "No input signal detected|No signal|Cannot Autodetect input"; then
-    return 1
-  fi
-  if echo "${out}" | grep -q "Input #0, decklink"; then
-    return 0
-  fi
-
-  return 1
-}
-
-audio_args() {
-  local codec="${AUDIO_CODEC:-aac}"
-
-  if [[ "${codec}" == "libfdk_aac" ]]; then
-    printf '%s' "-c:a libfdk_aac -ar ${AUDIO_RATE} -ac ${AUDIO_CHANNELS} -vbr ${FDK_VBR_MODE}"
-    return 0
-  fi
-
-  local abr="${AUDIO_BITRATE_K:-160k}"
-  printf '%s' "-c:a aac -b:a ${abr} -ar ${AUDIO_RATE} -ac ${AUDIO_CHANNELS}"
-}
-
-build_live_vf() {
-  # Build scale filter from OUTPUT_RESOLUTION (e.g. 1920x1080 -> 1920:1080)
-  local res="${OUTPUT_RESOLUTION:-1920x1080}"
-  local wh="${res/x/:}"
-  # Keep deinterlace + fps + scale, always ending with yuv420p
-  printf '%s' "bwdif=mode=1:parity=tff:deint=all,fps=25,scale=${wh}:flags=lanczos,format=yuv420p"
-}
-
-build_ffmpeg_live_cmd() {
-  local vf
-  vf="$(build_live_vf)"
-  cat <<EOF
+build_ffmpeg_uplink_cmd() {
+  if [[ "${UPLINK_REENCODE}" == "true" ]]; then
+    # Re-encode mode: decode multicast, re-encode to RTMP
+    local vf
+    vf="$(build_live_vf)"
+    cat <<EOF
 "${FFMPEG_BIN}" -hide_banner -loglevel info \\
-  -thread_queue_size 8192 \\
-  -fflags +genpts -use_wallclock_as_timestamps 1 \\
-  -f decklink -video_input ${VIDEO_INPUT} -audio_input ${AUDIO_INPUT} \\
-  -i "${DECKLINK_DEVICE}" \\
+  -fflags +discardcorrupt+nobuffer \\
+  -flags low_delay \\
+  -err_detect ignore_err \\
+  -analyzeduration 2000000 -probesize 5000000 \\
+  -f mpegts \\
+  -i "${MULTICAST_INPUT}" \\
   -vf "${vf}" \\
   -af "aresample=async=1:first_pts=0:min_hard_comp=0.100" \\
-  -color_primaries ${COLOR_PRIMARIES} -color_trc ${COLOR_TRC} -colorspace ${COLOR_SPACE} -color_range tv \\
   -c:v h264_videotoolbox -profile:v high -level 4.2 \\
   -b:v ${CURRENT_BITRATE} -maxrate ${CURRENT_BITRATE} -bufsize ${CURRENT_BUFSIZE} \\
   -g ${GOP} -keyint_min ${KEYINT_MIN} \\
@@ -607,89 +325,45 @@ build_ffmpeg_live_cmd() {
   -rw_timeout 15000000 \\
   -f flv "${RTMP_ENDPOINT}"
 EOF
-}
-
-build_ffmpeg_standby_cmd() {
-  local logo_input=""
-  local overlay_prefix=""
-
-  if [[ "${LOGO_ENABLE}" == "true" && -n "${LOGO_PATH:-}" && -f "${LOGO_PATH}" ]]; then
-    logo_input="-i \"${LOGO_PATH}\""
-    overlay_prefix="[0:v][1:v]overlay=${LOGO_X}:${LOGO_Y},"
-  fi
-
-  local standby_res="${OUTPUT_RESOLUTION:-1920x1080}"
-
-  cat <<EOF
-TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel info \\
-  -f lavfi -i "color=c=${STANDBY_BG_COLOR}:s=${standby_res}:r=${STANDBY_FPS}" \\
-  ${logo_input} \\
-  -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE}" \\
-  -filter_complex "${overlay_prefix}drawtext=fontfile=${FONT_FILE}:text='${STANDBY_TITLE}':x=${TEXT_X}:y=${TEXT_Y}:fontsize=${TITLE_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.35:boxborderw=18,drawtext=fontfile=${FONT_FILE}:text='%{localtime\\:%Y-%m-%d %H\\\\:%M\\\\:%S}':x=${TEXT_X}:y=${TEXT_Y}+${CLOCK_DY}:fontsize=${CLOCK_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.25:boxborderw=14,drawtext=fontfile=${FONT_FILE}:text='${STANDBY_SUBTITLE}':x=${TEXT_X}:y=${TEXT_Y}+${SUBTITLE_DY}:fontsize=${SUBTITLE_FONTSIZE}:fontcolor=white@0.95" \\
-  -map 0:v:0 -map 2:a:0 \\
-  -c:v h264_videotoolbox -profile:v high -level 4.2 \\
-  -b:v ${CURRENT_BITRATE} -maxrate ${CURRENT_BITRATE} -bufsize ${CURRENT_BUFSIZE} \\
-  -g ${GOP} -keyint_min ${KEYINT_MIN} -pix_fmt yuv420p \\
-  $(audio_args) \\
+  else
+    # Remux mode: copy video and audio from multicast to RTMP
+    cat <<EOF
+"${FFMPEG_BIN}" -hide_banner -loglevel info \\
+  -fflags +discardcorrupt+nobuffer \\
+  -flags low_delay \\
+  -err_detect ignore_err \\
+  -analyzeduration 2000000 -probesize 5000000 \\
+  -f mpegts \\
+  -i "${MULTICAST_INPUT}" \\
+  -c:v copy -c:a copy \\
   -stats_period 1 -progress "${PROGRESS_FILE}" \\
   -flvflags no_duration_filesize \\
   -rw_timeout 15000000 \\
   -f flv "${RTMP_ENDPOINT}"
 EOF
+  fi
 }
 
-kill_running_ffmpeg() {
-  /usr/bin/pkill -TERM -f "${FFMPEG_BIN}.*${DECKLINK_DEVICE}" >/dev/null 2>&1 || true
-  /usr/bin/pkill -TERM -f "${FFMPEG_BIN}.*color=c=${STANDBY_BG_COLOR}" >/dev/null 2>&1 || true
-  sleep 0.5
-  /usr/bin/pkill -KILL -f "${FFMPEG_BIN}.*${DECKLINK_DEVICE}" >/dev/null 2>&1 || true
-  /usr/bin/pkill -KILL -f "${FFMPEG_BIN}.*color=c=${STANDBY_BG_COLOR}" >/dev/null 2>&1 || true
-  sleep 1
+# ---------- Bitrate ladder callbacks ----------
+on_ffmpeg_success() {
+  CURRENT_BITRATE="${BITRATE_MAX_K}"
+  CURRENT_BUFSIZE="${BUFSIZE_MAX_K}"
 }
 
-preflight() {
-  require_bin "${FFMPEG_BIN}"
-  require_bin /usr/sbin/networksetup
-  require_bin /usr/sbin/scutil
-  require_bin /usr/sbin/ipconfig
-  require_bin /usr/sbin/netstat
-  require_bin /sbin/route
-  require_bin /usr/bin/pkill
-  require_bin /usr/bin/pmset
-  require_bin /usr/bin/dscacheutil
-  require_bin /usr/bin/killall
-
-  init_privs
-
-  if [[ "${ENABLE_STANDBY}" == "true" ]]; then
-    if [[ -n "${FONT_FILE:-}" && ! -f "${FONT_FILE}" ]]; then
-      log_event "WARN" "standby_font_missing" "Standby FONT_FILE missing; drawtext may fail" "\"font\":\"$(json_escape "${FONT_FILE}")\""
-      run_alert "standby_font_missing" "{\"font\":\"$(json_escape "${FONT_FILE}")\"}"
-    fi
-    if [[ "${LOGO_ENABLE}" == "true" && -n "${LOGO_PATH:-}" && ! -f "${LOGO_PATH}" ]]; then
-      log_event "WARN" "standby_logo_missing" "Logo file missing; standby will run without logo" "\"logo\":\"$(json_escape "${LOGO_PATH}")\""
-      run_alert "standby_logo_missing" "{\"logo\":\"$(json_escape "${LOGO_PATH}")\"}"
+on_ffmpeg_failure() {
+  if [[ "${UPLINK_REENCODE}" == "true" ]]; then
+    if [[ "${CONSEC_FAILS}" -ge "${DOWNGRADE_AFTER_CONSECUTIVE_FAILURES}" ]]; then
+      if [[ "${CURRENT_BITRATE}" != "${BITRATE_SAFE_K}" ]]; then
+        log_event "WARN" "bitrate_downgrade" "Downgrading bitrate for stability" "\"from\":\"${CURRENT_BITRATE}\",\"to\":\"${BITRATE_SAFE_K}\""
+        run_alert "bitrate_downgrade" "{\"from\":\"${CURRENT_BITRATE}\",\"to\":\"${BITRATE_SAFE_K}\"}"
+        CURRENT_BITRATE="${BITRATE_SAFE_K}"
+        CURRENT_BUFSIZE="${BUFSIZE_SAFE_K}"
+      fi
     fi
   fi
-
-  if [[ -z "${STREAM_KEY:-}" || "${STREAM_KEY}" == "YOUR_STREAM_KEY_HERE" ]]; then
-    log_event "ERROR" "config_stream_key_missing" "STREAM_KEY is not set in config"
-    run_alert "config_stream_key_missing" "{}"
-    exit 4
-  fi
-
-  RTMP_ENDPOINT="${YOUTUBE_RTMP_URL}/${STREAM_KEY}"
-  echo $$ > "${PID_FILE}"
-  echo "-1" > "${SDI_SIGNAL_FILE}"
-
-  log_event "INFO" "boot" "yt-sdi-streamer starting"
-  run_alert "boot" "{}"
-  write_status "boot" "{}"
-
-  discover_iface_for_service || true
-  write_metrics_snapshot "boot" "{\"pid\":$$}"
 }
 
+# ---------- Network hardening ----------
 harden_network() {
   if [[ "${DO_NETWORK_HARDENING}" != "true" ]]; then
     log_event "INFO" "net_hardening_skip" "Network hardening disabled"
@@ -699,6 +373,8 @@ harden_network() {
   log_event "INFO" "net_hardening" "Starting network hardening"
   write_status "net_hardening" "{}"
   write_metrics_snapshot "net_hardening" "{}"
+
+  init_privs
 
   if [[ "$(id -u)" -ne 0 && -z "${SUDO}" ]]; then
     log_event "WARN" "net_hardening" "Not running as root and sudo -n unavailable; skipping network hardening"
@@ -746,255 +422,38 @@ harden_network() {
   write_metrics_snapshot "idle" "{}"
 }
 
-run_ffmpeg_mode() {
-  local mode="$1"
-  MODE="${mode}"
-  TOTAL_MODE_STARTS=$((TOTAL_MODE_STARTS+1))
-  START_EPOCH="$(date +%s)"
+# ---------- Preflight ----------
+preflight() {
+  require_bin "${FFMPEG_BIN}"
+  require_bin /usr/sbin/networksetup
+  require_bin /usr/sbin/scutil
+  require_bin /usr/sbin/ipconfig
+  require_bin /usr/sbin/netstat
+  require_bin /sbin/route
+  require_bin /usr/bin/pkill
+  require_bin /usr/bin/pmset
+  require_bin /usr/bin/dscacheutil
+  require_bin /usr/bin/killall
 
-  cleanup_logs_by_size
-
-  log_event "INFO" "mode_start" "Starting mode ${mode}" "\"mode\":\"$(json_escape "${mode}")\""
-  run_alert "mode_start" "{\"mode\":\"$(json_escape "${mode}")\",\"bitrate\":\"${CURRENT_BITRATE}\"}"
-  write_status "${mode}_starting" "{\"mode\":\"$(json_escape "${mode}")\",\"bitrate\":\"${CURRENT_BITRATE}\"}"
-
-  rm -f "${PROGRESS_FILE}" >/dev/null 2>&1 || true
-
-  local stall_pid="" metrics_pid=""
-
-  if [[ "${ENABLE_OUTPUT_STALL_WATCHDOG}" == "true" ]]; then
-    watch_output_stall &
-    stall_pid="$!"
-    _MAIN_STALL_PID="${stall_pid}"
-    log_event "INFO" "stall_watchdog_start" "Started output stall watchdog" "\"pid\":${stall_pid}"
+  if [[ -z "${STREAM_KEY:-}" || "${STREAM_KEY}" == "YOUR_STREAM_KEY_HERE" || "${STREAM_KEY}" == "YOUR-STREAM-KEY-HERE" ]]; then
+    log_event "ERROR" "config_stream_key_missing" "STREAM_KEY is not set in config"
+    run_alert "config_stream_key_missing" "{}"
+    exit 4
   fi
 
-  metrics_loop &
-  metrics_pid="$!"
-  _MAIN_METRICS_PID="${metrics_pid}"
-
-  local rc
-  local ffmpeg_pid=""
-  local nosignal_file="${LOG_DIR}/nosignal.$$"
-  local monitor_pid="" tail_pid=""
-  local monitor_tail_pid_file="${LOG_DIR}/monitor_tail.$$"
-
-  # Ensure ffmpeg log exists before tail starts
-  touch "${FFMPEG_LOG}"
-
-  set +e
-  if [[ "${mode}" == "live" ]]; then
-    # Launch ffmpeg in background to get reliable PID + exit code
-    bash -c "$(build_ffmpeg_live_cmd)" >> "${FFMPEG_LOG}" 2>&1 &
-    ffmpeg_pid=$!
-    _MAIN_FFMPEG_PID="${ffmpeg_pid}"
-
-    # Tail ffmpeg log to stdout for visibility
-    tail -n +1 -f "${FFMPEG_LOG}" &
-    tail_pid=$!
-    _MAIN_TAIL_PID="${tail_pid}"
-
-    # Background monitor: watch for no-signal and update status.
-    # The monitor writes its internal tail PID to monitor_tail_pid_file so we
-    # can kill it explicitly and avoid wait() deadlocking on tail -f.
-    rm -f "${nosignal_file}" "${monitor_tail_pid_file}"
-    (
-      tail -n +1 -f "${FFMPEG_LOG}" 2>/dev/null &
-      echo $! > "${monitor_tail_pid_file}"
-      wait $!
-    ) | while IFS= read -r line; do
-      local short
-      short="$(echo "${line}" | tail -c 500 | tr -d '\r')"
-      write_status "running" "{\"mode\":\"live\",\"bitrate\":\"${CURRENT_BITRATE}\",\"ffmpeg\":\"$(json_escape "${short}")\"}"
-
-      if echo "${line}" | grep -qiE "No input signal detected|No signal|Cannot Autodetect input"; then
-        echo "1" >> "${nosignal_file}"
-        echo "0" > "${SDI_SIGNAL_FILE}"
-        local cnt
-        cnt=$(wc -l < "${nosignal_file}" 2>/dev/null || echo 0)
-        log_event "WARN" "no_signal" "SDI input signal missing" "\"count\":${cnt}"
-        run_alert "no_signal" "{\"count\":${cnt}}"
-        if [[ "${cnt}" -ge "${MAX_NO_SIGNAL_LINES}" ]]; then
-          log_event "ERROR" "no_signal_restart" "Too many no-signal messages; restarting FFmpeg"
-          run_alert "no_signal_restart" "{\"count\":${cnt}}"
-          kill "${ffmpeg_pid}" 2>/dev/null || true
-          break
-        fi
-      else
-        # Signal recovered: if nosignal_file has content, signal was lost and is now back
-        if [[ -s "${nosignal_file}" ]]; then
-          echo "1" > "${SDI_SIGNAL_FILE}"
-        fi
-        : > "${nosignal_file}" 2>/dev/null || true
-      fi
-    done &
-    monitor_pid=$!
-    _MAIN_MONITOR_PID="${monitor_pid}"
-
-    # Wait for ffmpeg to finish — reliable exit code
-    wait "${ffmpeg_pid}" 2>/dev/null
-    rc=$?
-
-    # Read the monitor's internal tail PID and kill it first, then kill the monitor.
-    # This prevents wait() deadlocking because tail -f never produces EOF on its own.
-    local _mtail_pid
-    _mtail_pid="$(cat "${monitor_tail_pid_file}" 2>/dev/null || true)"
-    _MAIN_MONITOR_TAIL_PID="${_mtail_pid}"
-    kill "${tail_pid}" 2>/dev/null || true
-    kill "${_mtail_pid}" 2>/dev/null || true
-    kill "${monitor_pid}" 2>/dev/null || true
-    wait "${tail_pid}" 2>/dev/null || true
-    wait "${_mtail_pid}" 2>/dev/null || true
-    wait "${monitor_pid}" 2>/dev/null || true
-    rm -f "${nosignal_file}" "${monitor_tail_pid_file}"
-
-  else
-    # STANDBY mode — same background PID pattern for reliable exit code
-    bash -c "$(build_ffmpeg_standby_cmd)" >> "${FFMPEG_LOG}" 2>&1 &
-    ffmpeg_pid=$!
-    _MAIN_FFMPEG_PID="${ffmpeg_pid}"
-
-    # Tail ffmpeg log to stdout for visibility
-    tail -n +1 -f "${FFMPEG_LOG}" &
-    tail_pid=$!
-    _MAIN_TAIL_PID="${tail_pid}"
-
-    # Background status updater.
-    # Same pattern: track internal tail PID to avoid wait() deadlock.
-    rm -f "${monitor_tail_pid_file}"
-    (
-      tail -n +1 -f "${FFMPEG_LOG}" 2>/dev/null &
-      echo $! > "${monitor_tail_pid_file}"
-      wait $!
-    ) | while IFS= read -r line; do
-      local short
-      short="$(echo "${line}" | tail -c 500 | tr -d '\r')"
-      write_status "running" "{\"mode\":\"standby\",\"bitrate\":\"${CURRENT_BITRATE}\",\"ffmpeg\":\"$(json_escape "${short}")\"}"
-    done &
-    monitor_pid=$!
-    _MAIN_MONITOR_PID="${monitor_pid}"
-
-    # Wait for ffmpeg to finish — reliable exit code
-    wait "${ffmpeg_pid}" 2>/dev/null
-    rc=$?
-
-    # Kill monitor's internal tail PID before waiting
-    local _mtail_pid
-    _mtail_pid="$(cat "${monitor_tail_pid_file}" 2>/dev/null || true)"
-    _MAIN_MONITOR_TAIL_PID="${_mtail_pid}"
-    kill "${tail_pid}" 2>/dev/null || true
-    kill "${_mtail_pid}" 2>/dev/null || true
-    kill "${monitor_pid}" 2>/dev/null || true
-    wait "${tail_pid}" 2>/dev/null || true
-    wait "${_mtail_pid}" 2>/dev/null || true
-    wait "${monitor_pid}" 2>/dev/null || true
-    rm -f "${monitor_tail_pid_file}"
-  fi
-  set -e
-
-  [[ -n "${metrics_pid}" ]] && kill "${metrics_pid}" >/dev/null 2>&1 || true
-  [[ -n "${stall_pid}" ]] && kill "${stall_pid}" >/dev/null 2>&1 || true
-
-  TOTAL_FFMPEG_EXITS=$((TOTAL_FFMPEG_EXITS+1))
-  LAST_EXIT_RC="${rc}"
-  write_metrics_snapshot "ffmpeg_exited" "{\"rc\":${rc}}"
-
-  return "${rc}"
-}
-
-adjust_bitrate_on_failures() {
-  if [[ "${CONSEC_FAILS}" -ge "${DOWNGRADE_AFTER_CONSECUTIVE_FAILURES}" ]]; then
-    if [[ "${CURRENT_BITRATE}" != "${BITRATE_SAFE_K}" ]]; then
-      log_event "WARN" "bitrate_downgrade" "Downgrading bitrate for stability" "\"from\":\"${CURRENT_BITRATE}\",\"to\":\"${BITRATE_SAFE_K}\""
-      run_alert "bitrate_downgrade" "{\"from\":\"${CURRENT_BITRATE}\",\"to\":\"${BITRATE_SAFE_K}\"}"
-      CURRENT_BITRATE="${BITRATE_SAFE_K}"
-      CURRENT_BUFSIZE="${BUFSIZE_SAFE_K}"
-    fi
-  fi
-}
-
-supervisor_loop() {
+  RTMP_ENDPOINT="${YOUTUBE_RTMP_URL}/${STREAM_KEY}"
   CURRENT_BITRATE="${BITRATE_MAX_K}"
   CURRENT_BUFSIZE="${BUFSIZE_MAX_K}"
 
-  CONSEC_FAILS=0
-  BACKOFF="${RESTART_BACKOFF_SECONDS}"
-  OK_COUNT=0
-  BAD_COUNT=0
+  echo $$ > "${PID_FILE}"
+  echo "-1" > "${SDI_SIGNAL_FILE}"
 
-  if [[ "${ENABLE_STANDBY}" == "true" ]]; then
-    MODE="standby"
-  else
-    MODE="live"
-  fi
+  log_event "INFO" "boot" "yt-uplink starting" "\"reencode\":\"${UPLINK_REENCODE}\",\"multicast\":\"${MULTICAST_IP}:${MULTICAST_PORT}\""
+  run_alert "boot" "{}"
+  write_status "boot" "{}"
 
-  log_event "INFO" "supervisor_start" "Supervisor loop started"
-  run_alert "supervisor_start" "{}"
-  write_status "supervising" "{\"mode\":\"${MODE}\"}"
-  write_metrics_snapshot "supervising" "{}"
-
-  while true; do
-    if probe_sdi_signal; then
-      PROBE_OK_COUNT=$((PROBE_OK_COUNT+1))
-      OK_COUNT=$((OK_COUNT+1))
-      BAD_COUNT=0
-      echo "1" > "${SDI_SIGNAL_FILE}"
-    else
-      PROBE_BAD_COUNT=$((PROBE_BAD_COUNT+1))
-      BAD_COUNT=$((BAD_COUNT+1))
-      OK_COUNT=0
-      echo "0" > "${SDI_SIGNAL_FILE}"
-    fi
-
-    if [[ "${ENABLE_STANDBY}" == "true" ]]; then
-      if [[ "${MODE}" != "standby" && "${BAD_COUNT}" -ge "${SWITCH_TO_STANDBY_AFTER}" ]]; then
-        log_event "WARN" "switch_to_standby" "Switching to standby (signal missing)" "\"bad\":${BAD_COUNT}"
-        run_alert "switch_to_standby" "{\"bad\":${BAD_COUNT}}"
-        kill_running_ffmpeg
-        MODE="standby"
-      fi
-
-      if [[ "${MODE}" != "live" && "${OK_COUNT}" -ge "${SWITCH_TO_LIVE_AFTER}" ]]; then
-        log_event "INFO" "switch_to_live" "Switching to live (signal present)" "\"ok\":${OK_COUNT}"
-        run_alert "switch_to_live" "{\"ok\":${OK_COUNT}}"
-        kill_running_ffmpeg
-        MODE="live"
-      fi
-    else
-      MODE="live"
-    fi
-
-    set +e
-    run_ffmpeg_mode "${MODE}"
-    local rc=$?
-    set -e
-
-    if [[ "${rc}" -eq 0 ]]; then
-      log_event "WARN" "ffmpeg_exit_normal" "FFmpeg exited normally; restarting" "\"rc\":${rc}"
-      run_alert "ffmpeg_exit_normal" "{\"rc\":${rc}}"
-      CONSEC_FAILS=0
-      BACKOFF="${RESTART_BACKOFF_SECONDS}"
-      CURRENT_BITRATE="${BITRATE_MAX_K}"
-      CURRENT_BUFSIZE="${BUFSIZE_MAX_K}"
-      sleep 1
-    else
-      CONSEC_FAILS=$((CONSEC_FAILS+1))
-      log_event "ERROR" "ffmpeg_exit_error" "FFmpeg exited with error" "\"rc\":${rc},\"consecutive_failures\":${CONSEC_FAILS}"
-      run_alert "ffmpeg_exit_error" "{\"rc\":${rc},\"consecutive_failures\":${CONSEC_FAILS}}"
-
-      adjust_bitrate_on_failures
-
-      BACKOFF=$(( BACKOFF * 2 ))
-      [[ "${BACKOFF}" -gt "${RESTART_BACKOFF_MAX_SECONDS}" ]] && BACKOFF="${RESTART_BACKOFF_MAX_SECONDS}"
-
-      write_status "backoff" "{\"seconds\":${BACKOFF},\"mode\":\"${MODE}\",\"rc\":${rc}}"
-      write_metrics_snapshot "backoff" "{\"seconds\":${BACKOFF},\"rc\":${rc}}"
-      log_event "INFO" "restart_backoff" "Restarting after backoff" "\"seconds\":${BACKOFF}"
-      sleep "${BACKOFF}"
-    fi
-
-    sleep "${PROBE_INTERVAL}"
-  done
+  discover_iface_for_service || true
+  write_metrics_snapshot "boot" "{\"pid\":$$}"
 }
 
 wait_for_dns() {
@@ -1013,12 +472,56 @@ wait_for_dns() {
   log_event "INFO" "dns_ready" "DNS resolved ${host} after ${i}s"
 }
 
+# ---------- Uplink supervisor (no SDI probe, just restart loop) ----------
+uplink_supervisor_loop() {
+  CONSEC_FAILS=0
+  BACKOFF="${RESTART_BACKOFF_SECONDS}"
+
+  log_event "INFO" "supervisor_start" "Uplink supervisor loop started"
+  run_alert "supervisor_start" "{}"
+  write_status "supervising" "{\"mode\":\"uplink\"}"
+  write_metrics_snapshot "supervising" "{}"
+
+  while true; do
+    set +e
+    run_ffmpeg_mode "live" build_ffmpeg_uplink_cmd "false"
+    local rc=$?
+    set -e
+
+    if [[ "${rc}" -eq 0 ]]; then
+      log_event "WARN" "ffmpeg_exit_normal" "Uplink FFmpeg exited normally; restarting" "\"rc\":${rc}"
+      run_alert "ffmpeg_exit_normal" "{\"rc\":${rc}}"
+      CONSEC_FAILS=0
+      BACKOFF="${RESTART_BACKOFF_SECONDS}"
+      on_ffmpeg_success
+      sleep 1
+    else
+      CONSEC_FAILS=$((CONSEC_FAILS+1))
+      log_event "ERROR" "ffmpeg_exit_error" "Uplink FFmpeg exited with error" "\"rc\":${rc},\"consecutive_failures\":${CONSEC_FAILS}"
+      run_alert "ffmpeg_exit_error" "{\"rc\":${rc},\"consecutive_failures\":${CONSEC_FAILS}}"
+
+      on_ffmpeg_failure
+
+      BACKOFF=$(( BACKOFF * 2 ))
+      [[ "${BACKOFF}" -gt "${RESTART_BACKOFF_MAX_SECONDS}" ]] && BACKOFF="${RESTART_BACKOFF_MAX_SECONDS}"
+
+      write_status "backoff" "{\"seconds\":${BACKOFF},\"mode\":\"uplink\",\"rc\":${rc}}"
+      write_metrics_snapshot "backoff" "{\"seconds\":${BACKOFF},\"rc\":${rc}}"
+      log_event "INFO" "restart_backoff" "Uplink restarting after backoff" "\"seconds\":${BACKOFF}"
+      sleep "${BACKOFF}"
+    fi
+
+    sleep 2
+  done
+}
+
+# ---------- Main ----------
 main() {
   umask 022
   preflight
   harden_network || true
   wait_for_dns
-  supervisor_loop
+  uplink_supervisor_loop
 }
 
 main "$@"
