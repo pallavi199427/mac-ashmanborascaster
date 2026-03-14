@@ -89,6 +89,7 @@ ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-playback-ur
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-profiles
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-profile *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh switch-profile *
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-dashboard-creds
 # launchctl for all services
 ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-sdi-streamer
 ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-ingest
@@ -127,6 +128,22 @@ else
   echo "[OK] Profiles file already exists: ${PROFILES_FILE}"
 fi
 
+# Add dashboard credentials to config if missing
+CONF="/etc/yt-sdi-streamer.conf"
+if [[ -f "${CONF}" ]]; then
+  if ! grep -q '^DASHBOARD_USER=' "${CONF}"; then
+    cat >> "${CONF}" <<'CREDS'
+
+# --- Dashboard credentials ---
+DASHBOARD_USER="ashman"
+DASHBOARD_PASS="apple"
+CREDS
+    echo "[OK] Added dashboard credentials to ${CONF}"
+  else
+    echo "[OK] Dashboard credentials already in ${CONF}"
+  fi
+fi
+
 # Make sure ytctl is installed
 if [[ ! -f "${INSTALL_BIN}/ytctl" ]]; then
   echo "[WARN] ytctl not found at ${INSTALL_BIN}/ytctl — copying from source"
@@ -150,7 +167,7 @@ echo "[OK] LaunchDaemon installed and started"
 
 echo
 echo "=== Dashboard is running ==="
-echo "  URL: http://$(hostname):8080"
+echo "  URL: http://$(hostname)"
 echo "  Logs: ${LOG_DIR}/dashboard.out / dashboard.err"
 echo
 echo "To uninstall, run: sudo bash $(dirname "$0")/uninstall_dashboard.sh"

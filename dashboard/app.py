@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import secrets
 import subprocess
 import time
 
@@ -13,7 +14,7 @@ try:
 except (PermissionError, OSError):
     os.chdir("/tmp")
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
 
 # ---------- Configuration ----------
 METRICS_PATH = "/var/log/yt-sdi-streamer/metrics.json"
@@ -25,7 +26,10 @@ INGEST_EVENTS_PATH = "/var/log/yt-sdi-streamer/ingest_events.jsonl"
 BRIDGE_STATUS_PATH = "/var/log/yt-sdi-streamer/bridge_status.json"
 YTCTL_PATH = "/usr/local/bin/ytctl"
 HELPER_PATH = "/usr/local/bin/yt_dashboard_helper.sh"
-DASHBOARD_PORT = 8080
+DASHBOARD_PORT = 80
+
+DASHBOARD_USER = "ashman"
+DASHBOARD_PASS = "apple"
 
 QUALITY_PRESETS = {
     "low":      {"label": "Low",      "bitrate": "2500k", "resolution": "1280x720",  "description": "Bandwidth friendly"},
@@ -41,6 +45,7 @@ LOCAL_STATIC = os.path.join(SCRIPT_DIR, "static")
 STATIC_DIR = INSTALL_STATIC if os.path.isdir(INSTALL_STATIC) else LOCAL_STATIC
 
 app = Flask(__name__, static_folder=STATIC_DIR)
+app.secret_key = os.environ.get("DASHBOARD_SECRET", secrets.token_hex(32))
 
 # ---------- Helpers ----------
 
@@ -127,6 +132,88 @@ def is_service_running(label=None):
         running = False
     _service_cache[label] = {"running": running, "checked_at": now}
     return running
+
+
+# ---------- Authentication ----------
+
+def load_dashboard_creds():
+    """Load dashboard credentials from config via helper script."""
+    global DASHBOARD_USER, DASHBOARD_PASS
+    try:
+        ok, output = run_sudo([HELPER_PATH, "read-dashboard-creds"])
+        if ok and output.strip():
+            lines = output.strip().split("\n")
+            if len(lines) >= 2:
+                DASHBOARD_USER = lines[0]
+                DASHBOARD_PASS = lines[1]
+    except Exception:
+        pass
+
+load_dashboard_creds()
+
+
+@app.before_request
+def require_login():
+    allowed = ("/login", "/static/")
+    if any(request.path.startswith(p) for p in allowed):
+        return
+    if not session.get("logged_in"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Not authenticated"}), 401
+        return redirect(url_for("login"))
+
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASHMAN Broadcast — Login</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="logo-icon">AB</div>
+      <h1>ASHMAN Broadcast</h1>
+    </div>
+    {% if error %}
+    <div class="login-error">{{ error }}</div>
+    {% endif %}
+    <form method="POST" action="/login">
+      <div class="login-field">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+      </div>
+      <div class="login-field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="login-btn">Login</button>
+    </form>
+  </div>
+</body>
+</html>"""
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        if username == DASHBOARD_USER and password == DASHBOARD_PASS:
+            session["logged_in"] = True
+            return redirect(url_for("index"))
+        return render_template_string(LOGIN_HTML, error="Invalid credentials")
+    return render_template_string(LOGIN_HTML, error=None)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 # ---------- API Routes ----------
@@ -441,7 +528,8 @@ HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-right">
-<span class="header-clock" id="headerClock">--:--:--</span>
+      <span class="header-clock" id="headerClock">--:--:--</span>
+      <a href="/logout" class="logout-btn" title="Logout">Logout</a>
     </div>
   </header>
 

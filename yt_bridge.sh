@@ -5,7 +5,7 @@ set -uo pipefail
 # yt_bridge.sh — Multicast to RTSP bridge (audio transcode for MediaMTX)
 #
 # Reads the MPEG-TS multicast stream from the ingest process, copies video,
-# transcodes audio to AAC (WebRTC-compatible), and pushes to MediaMTX via RTSP.
+# transcodes audio to Opus (native WebRTC codec), and pushes to MediaMTX via RTSP.
 # MediaMTX then serves this as a WebRTC stream for low-latency input preview.
 #
 # Simple watchdog loop: if FFmpeg exits, restart after 2 seconds.
@@ -76,7 +76,7 @@ while true; do
       -i "${MULTICAST_INPUT}" \
       -c:v copy \
       -bsf:v "extract_extradata=remove=0,dump_extra=freq=keyframe" \
-      -c:a aac -ar 48000 -ac 2 -b:a 128k \
+      -c:a libopus -ar 48000 -ac 2 -b:a 128k \
       -avoid_negative_ts make_zero \
       -max_interleave_delta 0 \
       -flags +global_header \

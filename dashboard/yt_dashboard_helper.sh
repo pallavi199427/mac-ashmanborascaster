@@ -170,8 +170,12 @@ print(p.get('resolution', '1920x1080'))
     fi
     echo "OK"
     ;;
+  read-dashboard-creds)
+    grep '^DASHBOARD_USER=' "${CONF}" | head -1 | sed 's/^DASHBOARD_USER="//' | sed 's/".*//'
+    grep '^DASHBOARD_PASS=' "${CONF}" | head -1 | sed 's/^DASHBOARD_PASS="//' | sed 's/".*//'
+    ;;
   *)
-    echo "Usage: $0 {read-key|write-key|read-resolution|write-resolution|read-bitrate|write-bitrate|read-playback-url|write-playback-url|read-profiles|write-profile|switch-profile}" >&2
+    echo "Usage: $0 {read-key|write-key|read-resolution|write-resolution|read-bitrate|write-bitrate|read-playback-url|write-playback-url|read-profiles|write-profile|switch-profile|read-dashboard-creds}" >&2
     exit 1
     ;;
 esac
