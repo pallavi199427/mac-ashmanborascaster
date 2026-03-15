@@ -80,7 +80,10 @@ case "${cmd}" in
     # Ensure 'k' suffix is always present (ffmpeg treats bare number as bits, not kbits)
     [[ "${bitrate}" != *k ]] && bitrate="${bitrate}k"
     sed -i '' "s/^BITRATE_MAX_K=.*/BITRATE_MAX_K=${bitrate}/" "${CONF}"
-    sed -i '' "s/^BUFSIZE_MAX_K=.*/BUFSIZE_MAX_K=${bitrate}/" "${CONF}"
+    # Bufsize = 2x bitrate for proper rate control
+    br_num="${bitrate%k}"
+    buf_num=$(( br_num * 2 ))
+    sed -i '' "s/^BUFSIZE_MAX_K=.*/BUFSIZE_MAX_K=${buf_num}k/" "${CONF}"
     echo "OK"
     ;;
   read-playback-url)
@@ -160,7 +163,10 @@ print(p.get('resolution', '1920x1080'))
       # Ensure 'k' suffix is always present
       [[ "${br}" != *k ]] && br="${br}k"
       sed -i '' "s/^BITRATE_MAX_K=.*/BITRATE_MAX_K=${br}/" "${CONF}"
-      sed -i '' "s/^BUFSIZE_MAX_K=.*/BUFSIZE_MAX_K=${br}/" "${CONF}"
+      # Bufsize = 2x bitrate for proper rate control
+      br_num="${br%k}"
+      buf_num=$(( br_num * 2 ))
+      sed -i '' "s/^BUFSIZE_MAX_K=.*/BUFSIZE_MAX_K=${buf_num}k/" "${CONF}"
     fi
     if [[ -n "${pu}" ]]; then
       sed -i '' "s|^PLAYBACK_URL=.*|PLAYBACK_URL=\"${pu}\"|" "${CONF}"

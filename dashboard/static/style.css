@@ -327,35 +327,6 @@ body::after {
 }
 .vu-mute-btn svg { width: 16px; height: 16px; }
 .vu-mute-btn:hover { background: rgba(255, 255, 255, 0.15); color: var(--text); }
-.vu-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 20px;
-}
-.vu-bar {
-  width: 4px;
-  height: 100%;
-  border-radius: 1px;
-  opacity: 0.25;
-  transition: opacity 0.08s;
-}
-.vu-bar.green { background: var(--green); }
-.vu-bar.amber { background: var(--amber); }
-.vu-bar.red { background: var(--red); }
-.vu-bar.active { opacity: 1; }
-.vu-bar.active.green { box-shadow: 0 0 4px var(--green); }
-.vu-bar.active.amber { box-shadow: 0 0 4px var(--amber); }
-.vu-bar.active.red { box-shadow: 0 0 4px var(--red); }
-.vu-db {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--text-dim);
-  min-width: 42px;
-  text-align: right;
-  white-space: nowrap;
-}
 
 .playback-area {
   flex: 1;
@@ -413,7 +384,9 @@ body::after {
   border-radius: var(--radius);
   transition: border-color 0.2s, background 0.2s;
   flex-shrink: 0;
+  flex-grow: 1;
 }
+.sidebar-panel:first-child { flex-grow: 0; }
 .sidebar-panel:hover { border-color: rgba(255, 255, 255, 0.12); background: var(--glass-hover); }
 
 .panel-header {
@@ -710,20 +683,20 @@ select.key-input option { background: #1a1a2e; color: var(--text); }
 /* ── Logout Button ── */
 .logout-btn {
   font-size: 11px; font-weight: 600;
-  color: var(--text-dim);
+  color: var(--text);
   text-decoration: none;
   text-transform: uppercase;
   letter-spacing: 1px;
   padding: 5px 12px;
   border-radius: var(--radius-xs);
-  border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
   transition: all 0.2s;
 }
 .logout-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text);
-  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.25);
 }
 
 /* ── Login Page ── */

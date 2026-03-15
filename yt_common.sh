@@ -142,6 +142,17 @@ cleanup_logs_by_size() {
       log_event "WARN" "log_trim" "Trimmed ffmpeg log (safety)" "\"max_mb\":${max_ffmpeg_mb}"
     fi
   fi
+
+  # Clean stale monitor_tail.* and nosignal.* files from dead PIDs
+  local _stale_f _stale_pid
+  for _stale_f in "${LOG_DIR}"/monitor_tail.* "${LOG_DIR}"/nosignal.*; do
+    [[ -f "${_stale_f}" ]] || continue
+    _stale_pid="${_stale_f##*.}"
+    [[ "${_stale_pid}" == "$$" ]] && continue
+    if ! kill -0 "${_stale_pid}" 2>/dev/null; then
+      rm -f "${_stale_f}"
+    fi
+  done
 }
 
 # ---------- Singleton lock ----------
@@ -392,8 +403,8 @@ run_ffmpeg_mode() {
   ffmpeg_pid=$!
   _MAIN_FFMPEG_PID="${ffmpeg_pid}"
 
-  # Tail ffmpeg log for visibility
-  tail -n +1 -f "${FFMPEG_LOG}" &
+  # Tail ffmpeg log for visibility (send to /dev/null to avoid bloating launchd.out)
+  tail -n +1 -f "${FFMPEG_LOG}" >/dev/null 2>&1 &
   tail_pid=$!
   _MAIN_TAIL_PID="${tail_pid}"
 

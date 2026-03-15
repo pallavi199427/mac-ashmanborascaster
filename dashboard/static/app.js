@@ -6,8 +6,6 @@ const PIPELINE_POLL_MS = 5000;
 let actionInProgress = false;
 let lastServiceState = null;
 let prevNet = null;
-let rxHistory = [];
-let txHistory = [];
 let profilesData = null; // { active: 'profile1', profiles: { ... } }
 let openEditPanel = null;
 let revealedKeys = {}; // profileId -> true/false
@@ -125,8 +123,6 @@ function scheduleWhepRetry() {
 /* ── Audio VU Meter ── */
 let pendingAudioStream = null;
 
-let vuDebugCounter = 0;
-
 function setupAudioMeter(stream) {
   pendingAudioStream = stream;
   // Create AudioContext eagerly — it may start suspended, that's OK
@@ -180,70 +176,12 @@ document.addEventListener('click', function resumeAudio() {
 }, { once: false });
 
 function updateVuMeter() {
-  if (!audioAnalyser || !audioCtx || audioCtx.state !== 'running') {
-    // Keep polling — will start working once AudioContext resumes
-    vuAnimFrame = requestAnimationFrame(updateVuMeter);
-    return;
-  }
-
-  // Use time-domain data (raw waveform) — much more reliable than frequency data
-  // for VU metering, especially with WebRTC audio streams
-  var bufLen = audioAnalyser.fftSize;
-  var dataArray = new Uint8Array(bufLen);
-  audioAnalyser.getByteTimeDomainData(dataArray);
-
-  // Calculate RMS from waveform: 128 = silence, deviation = signal
-  var sum = 0;
-  for (var i = 0; i < bufLen; i++) {
-    var sample = (dataArray[i] - 128) / 128.0; // normalize to -1..1
-    sum += sample * sample;
-  }
-  var rms = Math.sqrt(sum / bufLen);
-
-  // Debug logging every ~2 seconds (120 frames at 60fps)
-  vuDebugCounter++;
-  if (vuDebugCounter % 120 === 1) {
-    console.log('[Audio] VU rms=' + rms.toFixed(4) + ' ctxState=' + audioCtx.state + ' bufLen=' + bufLen);
-  }
-
-  // Convert to dB (0 dB = full scale)
-  var db = rms > 0.0001 ? 20 * Math.log10(rms) : -60;
-
-  // Map dB range to 0-100 level (-60 dB = 0%, 0 dB = 100%)
-  var level = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
-
-  // Update meter bars
-  var bars = document.querySelectorAll('.vu-bar');
-  var totalBars = bars.length;
-  var activeBars = Math.round((level / 100) * totalBars);
-  for (var i = 0; i < totalBars; i++) {
-    if (i < activeBars) {
-      bars[i].classList.add('active');
-    } else {
-      bars[i].classList.remove('active');
-    }
-  }
-
-  // Update dB display
-  var dbEl = document.getElementById('vuDb');
-  if (dbEl) {
-    if (db > -59) {
-      dbEl.textContent = Math.round(db) + ' dB';
-    } else {
-      dbEl.textContent = '-\u221E dB';
-    }
-  }
-
+  // Keep animation frame loop alive so AudioContext stays active for mute/unmute
   vuAnimFrame = requestAnimationFrame(updateVuMeter);
 }
 
 function resetVuMeter() {
-  var bars = document.querySelectorAll('.vu-bar');
-  for (var i = 0; i < bars.length; i++) {
-    bars[i].classList.remove('active');
-  }
-  var dbEl = document.getElementById('vuDb');
-  if (dbEl) dbEl.textContent = '-\u221E dB';
+  // No visual elements to reset
 }
 
 function toggleMute() {
@@ -424,6 +362,17 @@ function switchProfile(id) {
   }
 }
 
+function clearBroadcastStatus() {
+  setText('s-mode', '-');
+  setText('s-state', 'switching...');
+  setText('s-bitrate', '-');
+  setText('s-fps', '-');
+  setText('s-speed', '-');
+  setText('s-ts', '-');
+  var stateEl = document.getElementById('s-state');
+  if (stateEl) stateEl.className = 'stat-value warn';
+}
+
 async function doSwitchProfile(id, restart) {
   try {
     const res = await fetch('/api/profiles/switch', {
@@ -435,8 +384,21 @@ async function doSwitchProfile(id, restart) {
     if (data.ok) {
       profilesData.active = id;
       renderProfiles();
-      showToast('Switched to profile. ' + (restart ? 'Restarting...' : ''), true);
+      clearBroadcastStatus();
+      const pName = profilesData.profiles[id] ? profilesData.profiles[id].name : id;
       if (restart) {
+        showToast('Switched to ' + pName + '. Restarting broadcast...', true);
+      } else {
+        showToast('Switched to ' + pName + '. Click GO LIVE to start broadcasting.', true);
+      }
+      if (restart) {
+        // Restart ingest first (picks up new bitrate), then uplink (copies new stream)
+        // Bridge/mediamtx stay running so preview is not interrupted
+        await fetch('/api/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'restart', service: 'ingest' })
+        });
         executeAction('restart');
       }
     } else {
@@ -665,7 +627,6 @@ function updateMetrics(m) {
   const ff = m.ffmpeg || {};
   setText('s-fps', running && ff.fps ? ff.fps : '-');
   setText('s-speed', running && ff.speed ? ff.speed.trim() : '-');
-  setText('s-enc-bitrate', running && ff.enc_bitrate && ff.enc_bitrate !== '0' ? ff.enc_bitrate.trim() : '-');
   const speedEl = document.getElementById('s-speed');
   if (speedEl && running && ff.speed) {
     const sv = parseFloat(ff.speed);
@@ -752,33 +713,6 @@ function updateNetwork(m, running) {
   setText('n-iface', friendlyNet(n.iface, n.service, running));
   setText('n-ip', friendlyNet(n.ip, null, running));
   setText('n-gw', n.gateway || '-');
-
-  const nowMs = Date.now();
-  if (prevNet && n.rx_bytes != null && n.tx_bytes != null) {
-    const dtSec = (nowMs - prevNet.ts) / 1000;
-    if (dtSec > 1 && (n.rx_bytes !== prevNet.rx || n.tx_bytes !== prevNet.tx)) {
-      const rxRate = Math.max(0, (n.rx_bytes - prevNet.rx) / dtSec);
-      const txRate = Math.max(0, (n.tx_bytes - prevNet.tx) / dtSec);
-      rxHistory.push(rxRate);
-      txHistory.push(txRate);
-      if (rxHistory.length > 3) rxHistory.shift();
-      if (txHistory.length > 3) txHistory.shift();
-      prevNet = { rx: n.rx_bytes, tx: n.tx_bytes, ts: nowMs };
-    }
-  } else if (n.rx_bytes != null) {
-    prevNet = { rx: n.rx_bytes, tx: n.tx_bytes, ts: nowMs };
-  }
-  if (!running) {
-    rxHistory = [];
-    txHistory = [];
-    setText('n-rx-rate', '-');
-    setText('n-tx-rate', '-');
-  } else if (rxHistory.length > 0) {
-    const avgRx = rxHistory.reduce((a, b) => a + b, 0) / rxHistory.length;
-    const avgTx = txHistory.reduce((a, b) => a + b, 0) / txHistory.length;
-    setText('n-rx-rate', fmtRate(avgRx));
-    setText('n-tx-rate', fmtRate(avgTx));
-  }
 
   const ping = n.ping || {};
   if (ping && typeof ping === 'object' && ping.loss != null) {
@@ -894,6 +828,14 @@ async function executeAction(action) {
   updateButtonStates(lastServiceState);
 
   try {
+    // Restart ingest on start/restart so it picks up current profile bitrate
+    if (action === 'start' || action === 'restart') {
+      await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'restart', service: 'ingest' })
+      });
+    }
     const res = await fetch('/api/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -943,13 +885,6 @@ function fmtUptime(s) {
   const pad = n => String(n).padStart(2, '0');
   if (d > 0) return d + 'd ' + pad(h) + ':' + pad(m) + ':' + pad(sec);
   return pad(h) + ':' + pad(m) + ':' + pad(sec);
-}
-
-function fmtRate(bps) {
-  if (bps == null || bps <= 0) return '-';
-  if (bps >= 1e6) return (bps / 1e6).toFixed(2) + ' MB/s';
-  if (bps >= 1e3) return (bps / 1e3).toFixed(1) + ' KB/s';
-  return Math.round(bps) + ' B/s';
 }
 
 function fmtTime(ts) {

@@ -117,7 +117,7 @@ build_ffmpeg_live_cmd() {
   -f decklink -video_input ${VIDEO_INPUT} -audio_input ${AUDIO_INPUT} \\
   -i "${DECKLINK_DEVICE}" \\
   -vf "${vf}" \\
-  -af "aresample=async=1:first_pts=0:min_hard_comp=0.100" \\
+  -af "aresample=async=1:first_pts=0" \\
   -color_primaries ${COLOR_PRIMARIES} -color_trc ${COLOR_TRC} -colorspace ${COLOR_SPACE} -color_range tv \\
   -c:v h264_videotoolbox -profile:v high -level 4.2 \\
   -b:v ${bitrate} -maxrate ${bitrate} -bufsize ${bufsize} \\

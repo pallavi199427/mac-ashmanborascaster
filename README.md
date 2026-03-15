@@ -18,26 +18,28 @@ SDI Input → Ingest (ffmpeg/DeckLink) → Multicast (239.20.0.10)
 | Service | Script | Description |
 |---------|--------|-------------|
 | Ingest | `/usr/local/bin/yt_sdi_ingest.sh` | Captures SDI via DeckLink, outputs MPEG-TS multicast |
-| Bridge | `/usr/local/bin/yt_bridge.sh` | Reads multicast, transcodes audio to AAC, pushes RTSP to MediaMTX |
+| Bridge | `/usr/local/bin/yt_bridge.sh` | Reads multicast, transcodes audio to Opus, pushes RTSP to MediaMTX |
 | MediaMTX | `/usr/local/bin/start_mediamtx.sh` | RTSP server that serves WebRTC (WHEP) for low-latency browser preview |
 | Uplink | `/usr/local/bin/yt_sdi_streamer.sh` | Reads multicast, encodes/remuxes to RTMP, pushes to YouTube |
-| Dashboard | `/usr/local/bin/yt_dashboard.py` | Flask web UI (port 8080) for monitoring, control, and multi-profile management |
+| Dashboard | `/usr/local/bin/yt_dashboard.py` | Flask web UI (port 80) for monitoring, control, and multi-profile management |
 
 **Shared:**
 - `yt_common.sh` — Common functions sourced by ingest, bridge, and uplink
+- `alerts/` — Alert and webhook scripts sourced by ingest and uplink
 - `ytctl.sh` — Multi-service control CLI
 - `/etc/yt-sdi-streamer.conf` — Main configuration (mode 600)
 - `/etc/yt-sdi-streamer-profiles.json` — Stream profiles (low/standard/high)
+- `newsyslog.yt-sdi-streamer.conf` — Log rotation config
 
 ## Dashboard Features
 
 - **WebRTC Input Preview** — Low-latency SDI preview via WHEP (MediaMTX)
-- **Control Bar** — Start/Stop/Restart broadcast with live status indicator
+- **Audio VU Meter** — Real-time audio level meter
+- **Control Bar** — Start/Stop/Restart broadcast with uptime display and live status indicator
 - **Multi-Profile** — Switch between stream profiles (different bitrates, stream keys)
 - **Pipeline Status** — Per-service health indicators (ingest, bridge, MediaMTX, uplink)
-- **Broadcast Stats** — Mode, state, uptime, FPS, encoder bitrate, speed
-- **Network Monitor** — Interface, IP, gateway, RX/TX rates, packet loss, latency, jitter
-- **Event Log** — Real-time event stream with severity levels
+- **Broadcast Stats** — Mode, state, FPS, encoder bitrate, speed
+- **Network Monitor** — Interface, IP, gateway, packet loss, latency, jitter
 - **YouTube Playback Embed** — Embedded YouTube player for output monitoring
 
 ## Installed Paths (on Mac)
@@ -56,6 +58,21 @@ SDI Input → Ingest (ffmpeg/DeckLink) → Multicast (239.20.0.10)
 | `dashboard/yt_dashboard_helper.sh` | `/usr/local/bin/yt_dashboard_helper.sh` |
 | `yt-sdi-streamer.conf` | `/etc/yt-sdi-streamer.conf` (mode 600) |
 | `*.plist` | `/Library/LaunchDaemons/` |
+| `alerts/*` | `/usr/local/lib/yt-sdi-streamer/alerts/` |
+| `newsyslog.yt-sdi-streamer.conf` | `/etc/newsyslog.d/yt-sdi-streamer.conf` |
+
+## Deployment
+
+```bash
+# Deploy everything to Mac (from Linux dev machine)
+./deploy.sh
+```
+
+To uninstall:
+```bash
+sudo ./uninstall_yt_sdi_streamer.sh           # Keep config
+sudo ./uninstall_yt_sdi_streamer.sh --remove-config  # Remove everything
+```
 
 ## Service Management
 
@@ -67,18 +84,23 @@ sudo ytctl ingest status      # Check ingest status
 sudo ytctl bridge ffmpeg      # Follow bridge ffmpeg log
 ```
 
-Or via the web dashboard at `http://<mac-ip>:8080`
+Or via the web dashboard at `http://<mac-ip>`
 
-## FFmpeg Compilation (DeckLink support)
+## FFmpeg Compilation (DeckLink + Opus + AAC)
 
 ```bash
 export CPPFLAGS="-I/Users/kalaignarnetworks/include"
 export CFLAGS="$CPPFLAGS"
 export LDFLAGS="-L/Users/kalaignarnetworks/lib"
-./configure --enable-gpl --enable-nonfree --enable-decklink \
+./configure --enable-gpl --enable-nonfree \
+  --enable-decklink --enable-libfdk-aac \
+  --enable-videotoolbox --enable-audiotoolbox \
+  --enable-pthreads --enable-hardcoded-tables \
+  --enable-version3 --enable-libfreetype \
+  --enable-libfontconfig --enable-libopus \
   --extra-cflags="$CFLAGS" --extra-ldflags="$LDFLAGS"
 ```
 
-## Pending
+## Resolved
 
-- **Audio in input preview**: The WHEP preview currently has no working audio. The fix is to compile ffmpeg with libopus and use Opus audio in the bridge's RTSP stream to MediaMTX, so that the WebRTC/WHEP output to the browser carries audio natively (WebRTC prefers Opus over AAC).
+- **Audio in input preview** (fixed 2026-03-14): Bridge audio changed from AAC to libopus. WebRTC natively supports Opus, so MediaMTX passes audio through to the browser without transcoding. VU meter now shows levels in the dashboard.

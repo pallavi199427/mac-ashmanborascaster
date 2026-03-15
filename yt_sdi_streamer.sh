@@ -326,7 +326,8 @@ build_ffmpeg_uplink_cmd() {
   -f flv "${RTMP_ENDPOINT}"
 EOF
   else
-    # Remux mode: copy video and audio from multicast to RTMP
+    # Remux mode: copy video, re-encode audio to fix timestamp discontinuities
+    # from multicast UDP jitter/packet loss (prevents crackling on YouTube)
     cat <<EOF
 "${FFMPEG_BIN}" -hide_banner -loglevel info \\
   -fflags +discardcorrupt+nobuffer \\
@@ -335,7 +336,9 @@ EOF
   -analyzeduration 2000000 -probesize 5000000 \\
   -f mpegts \\
   -i "${MULTICAST_INPUT}" \\
-  -c:v copy -c:a copy \\
+  -c:v copy \\
+  -af "aresample=async=1:first_pts=0:min_hard_comp=0.100" \\
+  $(audio_args) \\
   -stats_period 1 -progress "${PROGRESS_FILE}" \\
   -flvflags no_duration_filesize \\
   -rw_timeout 15000000 \\

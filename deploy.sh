@@ -81,6 +81,49 @@ fi
 echo "[OK] Interface: ${IFACE}  |  Service: \"${SERVICE_NAME}\""
 echo
 
+# ── 1b. Ensure Python 3.8+ is installed ───────────────────────────────────
+echo "[..] Checking for Python 3..."
+
+PYTHON3=""
+for candidate in /usr/local/bin/python3.12 /usr/local/bin/python3 /usr/bin/python3; do
+  if "${candidate}" -c "import sys; sys.exit(0 if sys.version_info >= (3,8) else 1)" 2>/dev/null; then
+    PYTHON3="${candidate}"
+    break
+  fi
+done
+
+if [[ -z "${PYTHON3}" ]]; then
+  echo "[..] Python 3.8+ not found — installing Python 3.12..."
+  PY_PKG="/tmp/python-3.12.8-macos11.pkg"
+  curl -fSL -o "${PY_PKG}" "https://www.python.org/ftp/python/3.12.8/python-3.12.8-macos11.pkg"
+  installer -pkg "${PY_PKG}" -target /
+  rm -f "${PY_PKG}"
+
+  # Verify
+  if /usr/local/bin/python3.12 -c "import sys" 2>/dev/null; then
+    PYTHON3="/usr/local/bin/python3.12"
+    echo "[OK] Python 3.12 installed: ${PYTHON3}"
+  else
+    echo "[ERROR] Python installation failed. Install manually from:"
+    echo "        https://www.python.org/ftp/python/3.12.8/python-3.12.8-macos11.pkg"
+    exit 1
+  fi
+else
+  echo "[OK] Python 3 found: $(${PYTHON3} --version) at ${PYTHON3}"
+fi
+
+# Ensure Flask is installed
+echo "[..] Checking for Flask..."
+if "${PYTHON3}" -c "import flask" 2>/dev/null; then
+  echo "[OK] Flask is already installed"
+else
+  echo "[..] Installing Flask..."
+  "${PYTHON3}" -m pip install flask --break-system-packages 2>/dev/null \
+    || "${PYTHON3}" -m pip install flask
+  echo "[OK] Flask installed"
+fi
+echo
+
 # ── 2. Install streamer files ───────────────────────────────────────────────
 echo "[..] Installing streamer..."
 bash "${HERE}/install_yt_sdi_streamer.sh"
@@ -138,6 +181,6 @@ echo
 echo "=== Deploy complete ==="
 echo "  Interface : ${IFACE}"
 echo "  Service   : ${SERVICE_NAME}"
-echo "  Dashboard : http://$(hostname -s).local:8080"
+echo "  Dashboard : http://$(hostname -s).local"
 echo "  Logs      : /var/log/yt-sdi-streamer/"
 echo
