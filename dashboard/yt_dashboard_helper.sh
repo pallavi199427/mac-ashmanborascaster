@@ -189,7 +189,7 @@ import subprocess, json, re, sys
 # List all hardware ports with device names
 raw = subprocess.check_output(['/usr/sbin/networksetup', '-listallhardwareports'], text=True)
 ports = []
-SKIP = ('wi-fi', 'thunderbolt', 'bridge', 'firewire', 'bluetooth')
+SKIP = ('wi-fi', 'thunderbolt', 'bridge', 'firewire', 'bluetooth', 'ethernet adapter')
 cur = {}
 for line in raw.splitlines():
     if line.startswith('Hardware Port:'):
