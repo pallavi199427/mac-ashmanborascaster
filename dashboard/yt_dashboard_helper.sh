@@ -189,13 +189,15 @@ import subprocess, json, re, sys
 # List all hardware ports with device names
 raw = subprocess.check_output(['/usr/sbin/networksetup', '-listallhardwareports'], text=True)
 ports = []
+SKIP = ('wi-fi', 'thunderbolt', 'bridge', 'firewire', 'bluetooth')
 cur = {}
 for line in raw.splitlines():
     if line.startswith('Hardware Port:'):
         cur = {'name': line.split(':', 1)[1].strip()}
     elif line.startswith('Device:') and cur:
         cur['device'] = line.split(':', 1)[1].strip()
-        if cur['device'].startswith('en'):
+        name_lower = cur['name'].lower()
+        if cur['device'].startswith('en') and not any(s in name_lower for s in SKIP):
             ports.append(cur)
         cur = {}
 
