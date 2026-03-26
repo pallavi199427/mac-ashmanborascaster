@@ -416,6 +416,28 @@ def api_set_playback_url():
     return jsonify({"ok": True, "message": "Playback URL updated."})
 
 
+@app.route("/api/network", methods=["GET"])
+def api_get_network():
+    ok, output = run_sudo([HELPER_PATH, "read-network"])
+    if not ok:
+        return jsonify({"error": output}), 500
+    try:
+        return jsonify(json.loads(output))
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid network data"}), 500
+
+
+@app.route("/api/network", methods=["POST"])
+def api_set_network():
+    data = request.get_json(silent=True)
+    if not data or "service" not in data:
+        return jsonify({"error": "Missing 'service' in request body"}), 400
+    ok, output = run_sudo([HELPER_PATH, "write-network", json.dumps(data)])
+    if not ok:
+        return jsonify({"ok": False, "error": output}), 500
+    return jsonify({"ok": True, "message": "Network settings applied"})
+
+
 @app.route("/api/control", methods=["POST"])
 def api_control():
     data = request.get_json(silent=True)
@@ -626,14 +648,51 @@ HTML = """<!DOCTYPE html>
       <div class="sidebar-panel">
         <div class="panel-header">
           <span class="panel-title">NETWORK</span>
+          <button class="btn-icon" id="btn-net-config" onclick="openNetConfig()" title="Configure network">&#9881;</button>
         </div>
-        <div class="panel-body">
+        <div class="panel-body" id="net-stats">
           <div class="stat-row"><span class="stat-label">Interface</span><span class="stat-value" id="n-iface">-</span></div>
           <div class="stat-row"><span class="stat-label">IP Address</span><span class="stat-value" id="n-ip">-</span></div>
           <div class="stat-row"><span class="stat-label">Gateway</span><span class="stat-value" id="n-gw">-</span></div>
           <div class="stat-row"><span class="stat-label">Packet Loss</span><span class="stat-value" id="n-loss">-</span></div>
           <div class="stat-row"><span class="stat-label">Latency</span><span class="stat-value" id="n-avg">-</span></div>
           <div class="stat-row"><span class="stat-label">Jitter</span><span class="stat-value" id="n-jitter">-</span></div>
+        </div>
+        <div class="panel-body net-config-form" id="net-config" style="display:none">
+          <div class="form-group">
+            <label class="form-label">Interface</label>
+            <select id="nc-iface" class="form-input"></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Mode</label>
+            <div class="radio-group">
+              <label class="radio-label"><input type="radio" name="nc-mode" value="dhcp" checked onchange="toggleNetMode()"> DHCP</label>
+              <label class="radio-label"><input type="radio" name="nc-mode" value="static" onchange="toggleNetMode()"> Static</label>
+            </div>
+          </div>
+          <div id="nc-static-fields">
+            <div class="form-group">
+              <label class="form-label">IP Address</label>
+              <input type="text" id="nc-ip" class="form-input" placeholder="192.168.1.100">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Subnet Mask</label>
+              <input type="text" id="nc-subnet" class="form-input" placeholder="255.255.255.0">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Gateway</label>
+              <input type="text" id="nc-gateway" class="form-input" placeholder="192.168.1.1">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">DNS Servers</label>
+            <input type="text" id="nc-dns" class="form-input" placeholder="1.1.1.1, 8.8.8.8">
+          </div>
+          <div class="form-actions">
+            <button class="btn-apply" onclick="applyNetConfig()">Apply</button>
+            <button class="btn-cancel" onclick="closeNetConfig()">Cancel</button>
+          </div>
+          <div class="form-status" id="nc-status"></div>
         </div>
       </div>
 

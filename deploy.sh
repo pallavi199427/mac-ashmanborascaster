@@ -124,6 +124,17 @@ else
 fi
 echo
 
+# ── 1c. Dashboard credentials ─────────────────────────────────────────────
+echo "[..] Dashboard login credentials"
+echo "     (Press Enter to keep defaults)"
+read -r -p "       Username [ashman]: " DASH_USER
+DASH_USER="${DASH_USER:-ashman}"
+read -r -s -p "       Password [apple]: " DASH_PASS
+echo
+DASH_PASS="${DASH_PASS:-apple}"
+echo "[OK] Dashboard user: ${DASH_USER}"
+echo
+
 # ── 2. Install streamer files ───────────────────────────────────────────────
 echo "[..] Installing streamer..."
 bash "${HERE}/install_yt_sdi_streamer.sh"
@@ -147,6 +158,11 @@ sed -i '' "s|^NETWORK_SERVICE=.*|NETWORK_SERVICE=\"${SERVICE_NAME}\"|" "${CONF}"
 sed -i '' "s|^SERVICE_ORDER=.*|SERVICE_ORDER=(\"${SERVICE_NAME}\" \"Wi-Fi\" \"Thunderbolt Bridge\" \"iPhone USB\")|" "${CONF}"
 
 echo "[OK] NETWORK_SERVICE set to \"${SERVICE_NAME}\""
+
+# Patch dashboard credentials
+sed -i '' "s|^DASHBOARD_USER=.*|DASHBOARD_USER=\"${DASH_USER}\"|" "${CONF}"
+sed -i '' "s|^DASHBOARD_PASS=.*|DASHBOARD_PASS=\"${DASH_PASS}\"|" "${CONF}"
+echo "[OK] Dashboard credentials set for user: ${DASH_USER}"
 echo
 
 # ── 5. TCP keepalive ────────────────────────────────────────────────────────
@@ -182,5 +198,6 @@ echo "=== Deploy complete ==="
 echo "  Interface : ${IFACE}"
 echo "  Service   : ${SERVICE_NAME}"
 echo "  Dashboard : http://$(hostname -s).local"
+echo "  Login     : ${DASH_USER} / ********"
 echo "  Logs      : /var/log/yt-sdi-streamer/"
 echo

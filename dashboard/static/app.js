@@ -941,3 +941,115 @@ document.addEventListener('DOMContentLoaded', () => {
   // Start WebRTC preview player
   startWhepPlayer();
 });
+
+// ---------- Network Configuration ----------
+
+function openNetConfig() {
+  const form = document.getElementById('net-config');
+  const stats = document.getElementById('net-stats');
+  const status = document.getElementById('nc-status');
+  if (!form) return;
+  status.textContent = 'Loading...';
+  status.className = 'form-status';
+  form.style.display = '';
+  stats.style.display = 'none';
+
+  fetch('/api/network')
+    .then(r => r.json())
+    .then(data => {
+      status.textContent = '';
+      // Populate interface dropdown
+      const sel = document.getElementById('nc-iface');
+      sel.innerHTML = '';
+      (data.interfaces || []).forEach(iface => {
+        const opt = document.createElement('option');
+        opt.value = iface.name;
+        opt.textContent = iface.name + ' (' + iface.device + ')';
+        if (iface.name === data.active_service) opt.selected = true;
+        sel.appendChild(opt);
+      });
+
+      // Set mode
+      const radios = document.querySelectorAll('input[name="nc-mode"]');
+      radios.forEach(r => { r.checked = (r.value === (data.dhcp ? 'dhcp' : 'static')); });
+
+      // Populate fields
+      document.getElementById('nc-ip').value = data.ip || '';
+      document.getElementById('nc-subnet').value = data.subnet || '';
+      document.getElementById('nc-gateway').value = data.gateway || '';
+      document.getElementById('nc-dns').value = (data.dns || []).join(', ');
+
+      toggleNetMode();
+    })
+    .catch(err => {
+      status.textContent = 'Failed to load network config';
+      status.className = 'form-status error';
+    });
+}
+
+function closeNetConfig() {
+  const form = document.getElementById('net-config');
+  const stats = document.getElementById('net-stats');
+  if (form) form.style.display = 'none';
+  if (stats) stats.style.display = '';
+}
+
+function toggleNetMode() {
+  const mode = document.querySelector('input[name="nc-mode"]:checked');
+  const fields = document.getElementById('nc-static-fields');
+  if (!mode || !fields) return;
+  const isStatic = mode.value === 'static';
+  fields.style.opacity = isStatic ? '1' : '0.4';
+  fields.querySelectorAll('input').forEach(inp => { inp.disabled = !isStatic; });
+}
+
+function applyNetConfig() {
+  const status = document.getElementById('nc-status');
+  const mode = document.querySelector('input[name="nc-mode"]:checked');
+  if (!mode) return;
+
+  const payload = {
+    service: document.getElementById('nc-iface').value,
+    mode: mode.value
+  };
+
+  if (mode.value === 'static') {
+    payload.ip = document.getElementById('nc-ip').value.trim();
+    payload.subnet = document.getElementById('nc-subnet').value.trim();
+    payload.gateway = document.getElementById('nc-gateway').value.trim();
+    if (!payload.ip || !payload.subnet) {
+      status.textContent = 'IP and Subnet are required for static mode';
+      status.className = 'form-status error';
+      return;
+    }
+  }
+
+  const dnsVal = document.getElementById('nc-dns').value.trim();
+  if (dnsVal) {
+    payload.dns = dnsVal.split(/[,\s]+/).filter(d => d);
+  }
+
+  status.textContent = 'Applying...';
+  status.className = 'form-status';
+
+  fetch('/api/network', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        status.textContent = 'Network settings applied';
+        status.className = 'form-status success';
+        setTimeout(closeNetConfig, 2000);
+      } else {
+        status.textContent = data.error || 'Failed to apply';
+        status.className = 'form-status error';
+      }
+    })
+    .catch(err => {
+      status.textContent = 'Network error';
+      status.className = 'form-status error';
+    });
+}

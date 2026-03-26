@@ -850,3 +850,76 @@ select.key-input option { background: #1a1a2e; color: var(--text); }
     font-size: 12px;
   }
 }
+
+/* ── Network Config Form ── */
+.btn-icon {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 16px;
+  padding: 2px 6px; border-radius: var(--radius-xs);
+  transition: color 0.2s, background 0.2s;
+}
+.btn-icon:hover { color: #fff; background: rgba(255,255,255,0.08); }
+
+.net-config-form {
+  padding: 12px 16px;
+}
+.net-config-form .form-group {
+  margin-bottom: 10px;
+}
+.net-config-form .form-label {
+  display: block; font-size: 11px; font-weight: 600;
+  color: var(--text-label); text-transform: uppercase;
+  letter-spacing: 0.8px; margin-bottom: 4px;
+}
+.net-config-form .form-input {
+  width: 100%; box-sizing: border-box;
+  padding: 7px 10px; border-radius: var(--radius-xs);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--glass-border);
+  outline: none; transition: border-color 0.2s;
+}
+.net-config-form .form-input:focus {
+  border-color: var(--green);
+}
+.net-config-form .form-input:disabled {
+  opacity: 0.4; cursor: not-allowed;
+}
+.net-config-form select.form-input {
+  -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+.radio-group {
+  display: flex; gap: 16px;
+}
+.radio-label {
+  font-size: 12px; color: var(--text); cursor: pointer;
+  display: flex; align-items: center; gap: 5px;
+}
+.radio-label input[type="radio"] {
+  accent-color: var(--green);
+}
+.form-actions {
+  display: flex; gap: 8px; margin-top: 14px;
+}
+.btn-apply {
+  flex: 1; padding: 8px 0; border-radius: var(--radius-xs);
+  font-size: 12px; font-weight: 700;
+  background: linear-gradient(135deg, var(--green), #059669);
+  color: #fff; border: none; cursor: pointer;
+  transition: opacity 0.2s;
+}
+.btn-apply:hover { opacity: 0.85; }
+.net-config-form .btn-cancel {
+  flex: 1; padding: 8px 0;
+}
+.form-status {
+  font-size: 11px; margin-top: 8px; min-height: 16px;
+  color: var(--text-dim);
+}
+.form-status.success { color: var(--green); }
+.form-status.error { color: var(--red); }

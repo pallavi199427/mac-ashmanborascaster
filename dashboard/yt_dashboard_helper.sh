@@ -180,8 +180,127 @@ print(p.get('resolution', '1920x1080'))
     grep '^DASHBOARD_USER=' "${CONF}" | head -1 | sed 's/^DASHBOARD_USER="//' | sed 's/".*//'
     grep '^DASHBOARD_PASS=' "${CONF}" | head -1 | sed 's/^DASHBOARD_PASS="//' | sed 's/".*//'
     ;;
+  read-network)
+    # Return current network config as JSON
+    svc="$(grep '^NETWORK_SERVICE=' "${CONF}" | head -1 | sed 's/^NETWORK_SERVICE=//' | tr -d '"' | sed 's/#.*//' | tr -d ' ')"
+    python3 -c "
+import subprocess, json, re, sys
+
+# List all hardware ports with device names
+raw = subprocess.check_output(['/usr/sbin/networksetup', '-listallhardwareports'], text=True)
+ports = []
+cur = {}
+for line in raw.splitlines():
+    if line.startswith('Hardware Port:'):
+        cur = {'name': line.split(':', 1)[1].strip()}
+    elif line.startswith('Device:') and cur:
+        cur['device'] = line.split(':', 1)[1].strip()
+        if cur['device'].startswith('en'):
+            ports.append(cur)
+        cur = {}
+
+svc = sys.argv[1] if len(sys.argv) > 1 else ''
+ip = subnet = gateway = ''
+is_dhcp = True
+
+if svc:
+    try:
+        info = subprocess.check_output(
+            ['/usr/sbin/networksetup', '-getinfo', svc],
+            text=True, stderr=subprocess.DEVNULL)
+        is_dhcp = 'DHCP Configuration' in info
+        m = re.search(r'^IP address: (.+)', info, re.M)
+        if m: ip = m.group(1).strip()
+        m = re.search(r'^Subnet mask: (.+)', info, re.M)
+        if m: subnet = m.group(1).strip()
+        m = re.search(r'^Router: (.+)', info, re.M)
+        if m: gateway = m.group(1).strip()
+    except Exception:
+        pass
+
+dns = []
+if svc:
+    try:
+        dns_raw = subprocess.check_output(
+            ['/usr/sbin/networksetup', '-getdnsservers', svc],
+            text=True, stderr=subprocess.DEVNULL)
+        dns = [l.strip() for l in dns_raw.splitlines()
+               if re.match(r'^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$', l.strip())]
+    except Exception:
+        pass
+
+print(json.dumps({
+    'interfaces': ports,
+    'active_service': svc,
+    'dhcp': is_dhcp,
+    'ip': ip,
+    'subnet': subnet,
+    'gateway': gateway,
+    'dns': dns
+}))
+" "${svc}"
+    ;;
+  write-network)
+    # Usage: write-network '<json>'
+    json="${2:-}"
+    if [[ -z "${json}" ]]; then
+      echo "Missing JSON argument" >&2
+      exit 1
+    fi
+    python3 -c "
+import subprocess, json, sys, re
+
+data = json.loads(sys.argv[1])
+svc = data.get('service', '')
+mode = data.get('mode', 'dhcp')
+
+if not svc or not re.match(r'^[a-zA-Z0-9 /]+$', svc):
+    print('Invalid service name', file=sys.stderr)
+    sys.exit(1)
+
+ip_re = r'^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+
+if mode == 'dhcp':
+    subprocess.check_call(['/usr/sbin/networksetup', '-setdhcp', svc])
+else:
+    ip = data.get('ip', '')
+    subnet = data.get('subnet', '')
+    gw = data.get('gateway', '')
+    for val, name in [(ip, 'IP'), (subnet, 'Subnet')]:
+        if not re.match(ip_re, val):
+            print(f'Invalid {name} format', file=sys.stderr)
+            sys.exit(1)
+    if gw and not re.match(ip_re, gw):
+        print('Invalid gateway format', file=sys.stderr)
+        sys.exit(1)
+    args = ['/usr/sbin/networksetup', '-setmanual', svc, ip, subnet]
+    if gw:
+        args.append(gw)
+    subprocess.check_call(args)
+
+dns = data.get('dns', [])
+if dns:
+    for d in dns:
+        if not re.match(ip_re, d):
+            print(f'Invalid DNS: {d}', file=sys.stderr)
+            sys.exit(1)
+    subprocess.check_call(['/usr/sbin/networksetup', '-setdnsservers', svc] + dns)
+elif mode == 'dhcp':
+    subprocess.check_call(['/usr/sbin/networksetup', '-setdnsservers', svc, 'empty'])
+
+# Update NETWORK_SERVICE in conf if changed
+conf = '/etc/yt-sdi-streamer.conf'
+with open(conf) as f:
+    txt = f.read()
+txt = re.sub(r'^NETWORK_SERVICE=.*$', 'NETWORK_SERVICE=\"' + svc + '\"', txt, flags=re.M)
+with open(conf, 'w') as f:
+    f.write(txt)
+
+print('OK')
+" "${json}"
+    ;;
   *)
-    echo "Usage: $0 {read-key|write-key|read-resolution|write-resolution|read-bitrate|write-bitrate|read-playback-url|write-playback-url|read-profiles|write-profile|switch-profile|read-dashboard-creds}" >&2
+    echo "Usage: $0 {read-key|write-key|read-resolution|write-resolution|read-bitrate|write-bitrate|read-playback-url|write-playback-url|read-profiles|write-profile|switch-profile|read-dashboard-creds|read-network|write-network}" >&2
     exit 1
     ;;
 esac

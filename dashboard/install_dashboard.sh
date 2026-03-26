@@ -90,6 +90,8 @@ ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-profiles
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-profile *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh switch-profile *
 ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-dashboard-creds
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh read-network
+ALL ALL=(root) NOPASSWD: /usr/local/bin/yt_dashboard_helper.sh write-network *
 # launchctl for all services
 ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-sdi-streamer
 ALL ALL=(root) NOPASSWD: /usr/sbin/launchctl print system/com.kalaignar.yt-ingest
