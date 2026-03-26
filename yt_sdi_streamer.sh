@@ -13,7 +13,7 @@ set -euo pipefail
 # - Bitrate ladder: MAX → SAFE after repeated failures
 # - Output-stall watchdog (monitors ffmpeg -progress)
 # - Auto restart with exponential backoff
-# - Network hardening: service order, DNS, Wi-Fi off, sleep off, optional MTU
+# - Network hardening moved to yt_net_harden.sh (boot-time one-shot)
 #
 # Outputs:
 # - /var/log/yt-sdi-streamer/events.jsonl
@@ -366,63 +366,11 @@ on_ffmpeg_failure() {
   fi
 }
 
-# ---------- Network hardening ----------
-harden_network() {
-  if [[ "${DO_NETWORK_HARDENING}" != "true" ]]; then
-    log_event "INFO" "net_hardening_skip" "Network hardening disabled"
-    return 0
+# ---------- Quick DNS check (network hardening moved to yt_net_harden.sh) ----------
+check_dns_fast() {
+  if ! dscacheutil -q host -a name "a.rtmp.youtube.com" 2>/dev/null | grep -q "ip_address"; then
+    log_event "WARN" "dns_not_ready" "DNS for a.rtmp.youtube.com not yet resolved; proceeding anyway"
   fi
-
-  log_event "INFO" "net_hardening" "Starting network hardening"
-  write_status "net_hardening" "{}"
-  write_metrics_snapshot "net_hardening" "{}"
-
-  init_privs
-
-  if [[ "$(id -u)" -ne 0 && -z "${SUDO}" ]]; then
-    log_event "WARN" "net_hardening" "Not running as root and sudo -n unavailable; skipping network hardening"
-    write_status "idle" "{}"
-    return 0
-  fi
-
-  if [[ "${ENFORCE_SERVICE_ORDER}" == "true" ]]; then
-    local order=(/usr/sbin/networksetup -ordernetworkservices)
-    local svc
-    for svc in "${SERVICE_ORDER[@]}"; do
-      order+=("${svc}")
-    done
-    run_root "${order[@]}" >/dev/null 2>&1 || log_event "WARN" "net_hardening" "Could not enforce network service order"
-  fi
-
-  if [[ "${SET_DNS}" == "true" ]]; then
-    local dns=(/usr/sbin/networksetup -setdnsservers "${NETWORK_SERVICE}")
-    local d
-    for d in "${DNS_SERVERS[@]}"; do
-      dns+=("${d}")
-    done
-    run_root "${dns[@]}" >/dev/null 2>&1 || log_event "WARN" "net_hardening" "Could not set DNS servers"
-
-    run_root /usr/bin/dscacheutil -flushcache >/dev/null 2>&1 || true
-    run_root /usr/bin/killall -HUP mDNSResponder >/dev/null 2>&1 || true
-  fi
-
-  if [[ "${DISABLE_WIFI_DURING_RUN}" == "true" ]]; then
-    run_root /usr/sbin/networksetup -setairportpower "Wi-Fi" off >/dev/null 2>&1 || log_event "WARN" "net_hardening" "Could not disable Wi-Fi"
-  fi
-
-  if [[ "${DISABLE_SLEEP}" == "true" ]]; then
-    run_root /usr/bin/pmset -a sleep 0 disksleep 0 displaysleep 0 >/dev/null 2>&1 || log_event "WARN" "net_hardening" "Could not set pmset"
-  fi
-
-  if [[ -n "${MTU_VALUE}" ]]; then
-    run_root /usr/sbin/networksetup -setMTU "${NETWORK_SERVICE}" "${MTU_VALUE}" >/dev/null 2>&1 || log_event "WARN" "net_hardening" "Could not set MTU"
-  fi
-
-  discover_iface_for_service || true
-
-  log_event "INFO" "net_hardening" "Network hardening complete"
-  write_status "idle" "{}"
-  write_metrics_snapshot "idle" "{}"
 }
 
 # ---------- Preflight ----------
@@ -457,22 +405,6 @@ preflight() {
 
   discover_iface_for_service || true
   write_metrics_snapshot "boot" "{\"pid\":$$}"
-}
-
-wait_for_dns() {
-  local host="a.rtmp.youtube.com"
-  local max_wait=60
-  local i=0
-  log_event "INFO" "dns_wait" "Waiting for DNS to resolve ${host}"
-  while ! dscacheutil -q host -a name "${host}" 2>/dev/null | grep -q "ip_address"; do
-    i=$((i+1))
-    if [[ "${i}" -ge "${max_wait}" ]]; then
-      log_event "WARN" "dns_wait_timeout" "DNS did not resolve ${host} after ${max_wait}s; continuing anyway"
-      return 0
-    fi
-    sleep 1
-  done
-  log_event "INFO" "dns_ready" "DNS resolved ${host} after ${i}s"
 }
 
 # ---------- Uplink supervisor (no SDI probe, just restart loop) ----------
@@ -522,8 +454,7 @@ uplink_supervisor_loop() {
 main() {
   umask 022
   preflight
-  harden_network || true
-  wait_for_dns
+  check_dns_fast
   uplink_supervisor_loop
 }
 

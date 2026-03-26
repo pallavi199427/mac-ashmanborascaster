@@ -10,6 +10,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Service labels
+LABEL_NETHARDEN="com.kalaignar.yt-net-harden"
 LABEL_INGEST="com.kalaignar.yt-ingest"
 LABEL_BRIDGE="com.kalaignar.yt-bridge"
 LABEL_MEDIAMTX="com.kalaignar.mediamtx"
@@ -17,6 +18,7 @@ LABEL_UPLINK="com.kalaignar.yt-sdi-streamer"
 
 # Source files
 COMMON_SRC="${HERE}/yt_common.sh"
+NETHARDEN_SRC="${HERE}/yt_net_harden.sh"
 INGEST_SRC="${HERE}/yt_sdi_ingest.sh"
 BRIDGE_SRC="${HERE}/yt_bridge.sh"
 MEDIAMTX_START_SRC="${HERE}/start_mediamtx.sh"
@@ -27,6 +29,7 @@ YTCTL_SRC="${HERE}/ytctl.sh"
 NEWSYSLOG_SRC="${HERE}/newsyslog.yt-sdi-streamer.conf"
 ALERTS_SRC_DIR="${HERE}/alerts"
 
+PLIST_NETHARDEN_SRC="${HERE}/com.kalaignar.yt-net-harden.plist"
 PLIST_INGEST_SRC="${HERE}/com.kalaignar.yt-ingest.plist"
 PLIST_BRIDGE_SRC="${HERE}/com.kalaignar.yt-bridge.plist"
 PLIST_MEDIAMTX_SRC="${HERE}/com.kalaignar.mediamtx.plist"
@@ -49,6 +52,7 @@ fi
 need() { [[ -e "$1" ]] || { echo "Missing: $1" >&2; exit 1; }; }
 
 need "${COMMON_SRC}"
+need "${NETHARDEN_SRC}"
 need "${INGEST_SRC}"
 need "${BRIDGE_SRC}"
 need "${MEDIAMTX_START_SRC}"
@@ -58,6 +62,7 @@ need "${CONF_SRC}"
 need "${YTCTL_SRC}"
 need "${NEWSYSLOG_SRC}"
 need "${ALERTS_SRC_DIR}"
+need "${PLIST_NETHARDEN_SRC}"
 need "${PLIST_INGEST_SRC}"
 need "${PLIST_BRIDGE_SRC}"
 need "${PLIST_MEDIAMTX_SRC}"
@@ -71,6 +76,7 @@ sudo mkdir -p "${BIN_DIR}" "${LIB_DIR}" "${LIB_DIR}/alerts" "${LOG_DIR}" "${STAT
 # ---------- Install scripts ----------
 echo "Installing scripts..."
 sudo install -m 755 "${COMMON_SRC}"        "${BIN_DIR}/yt_common.sh"
+sudo install -m 755 "${NETHARDEN_SRC}"     "${BIN_DIR}/yt_net_harden.sh"
 sudo install -m 755 "${INGEST_SRC}"        "${BIN_DIR}/yt_sdi_ingest.sh"
 sudo install -m 755 "${BRIDGE_SRC}"        "${BIN_DIR}/yt_bridge.sh"
 sudo install -m 755 "${MEDIAMTX_START_SRC}" "${BIN_DIR}/start_mediamtx.sh"
@@ -95,17 +101,19 @@ sudo chmod -R 755 "${LIB_DIR}/alerts"
 echo "Installing LaunchDaemon plists..."
 
 # Unload existing services first
-for label in "${LABEL_UPLINK}" "${LABEL_BRIDGE}" "${LABEL_MEDIAMTX}" "${LABEL_INGEST}"; do
+for label in "${LABEL_UPLINK}" "${LABEL_BRIDGE}" "${LABEL_MEDIAMTX}" "${LABEL_INGEST}" "${LABEL_NETHARDEN}"; do
   sudo launchctl bootout system "${PLIST_DIR}/${label}.plist" >/dev/null 2>&1 || true
 done
 sleep 1
 
+sudo install -m 644 "${PLIST_NETHARDEN_SRC}" "${PLIST_DIR}/${LABEL_NETHARDEN}.plist"
 sudo install -m 644 "${PLIST_INGEST_SRC}"  "${PLIST_DIR}/${LABEL_INGEST}.plist"
 sudo install -m 644 "${PLIST_BRIDGE_SRC}"   "${PLIST_DIR}/${LABEL_BRIDGE}.plist"
 sudo install -m 644 "${PLIST_MEDIAMTX_SRC}" "${PLIST_DIR}/${LABEL_MEDIAMTX}.plist"
 sudo install -m 644 "${PLIST_UPLINK_SRC}"   "${PLIST_DIR}/${LABEL_UPLINK}.plist"
 
-sudo chown root:wheel "${PLIST_DIR}/${LABEL_INGEST}.plist" \
+sudo chown root:wheel "${PLIST_DIR}/${LABEL_NETHARDEN}.plist" \
+                       "${PLIST_DIR}/${LABEL_INGEST}.plist" \
                        "${PLIST_DIR}/${LABEL_BRIDGE}.plist" \
                        "${PLIST_DIR}/${LABEL_MEDIAMTX}.plist" \
                        "${PLIST_DIR}/${LABEL_UPLINK}.plist" || true
@@ -160,7 +168,7 @@ fi
 
 # ---------- Load services ----------
 echo "Loading services..."
-for label in "${LABEL_INGEST}" "${LABEL_MEDIAMTX}" "${LABEL_BRIDGE}" "${LABEL_UPLINK}"; do
+for label in "${LABEL_NETHARDEN}" "${LABEL_INGEST}" "${LABEL_MEDIAMTX}" "${LABEL_BRIDGE}" "${LABEL_UPLINK}"; do
   sudo launchctl bootstrap system "${PLIST_DIR}/${label}.plist"
   sudo launchctl enable system/"${label}"
   echo "  Loaded ${label}"
@@ -169,10 +177,11 @@ done
 echo ""
 echo "== Installed =="
 echo "Services:"
-echo "  Ingest:   ${LABEL_INGEST}"
-echo "  Bridge:   ${LABEL_BRIDGE}"
-echo "  MediaMTX: ${LABEL_MEDIAMTX}"
-echo "  Uplink:   ${LABEL_UPLINK}"
+echo "  NetHarden: ${LABEL_NETHARDEN} (one-shot, boot-time)"
+echo "  Ingest:    ${LABEL_INGEST}"
+echo "  Bridge:    ${LABEL_BRIDGE}"
+echo "  MediaMTX:  ${LABEL_MEDIAMTX}"
+echo "  Uplink:    ${LABEL_UPLINK}"
 echo ""
 echo "Logs:    ${LOG_DIR}"
 echo "Control: ytctl [service] {start|stop|restart|status}"

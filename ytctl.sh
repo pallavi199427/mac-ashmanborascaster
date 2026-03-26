@@ -15,6 +15,7 @@ LOG_DIR="/var/log/yt-sdi-streamer"
 # Service definitions — bash 3.x compatible (no declare -A)
 get_label() {
   case "$1" in
+    netharden) echo "com.kalaignar.yt-net-harden" ;;
     ingest)    echo "com.kalaignar.yt-ingest" ;;
     bridge)    echo "com.kalaignar.yt-bridge" ;;
     mediamtx)  echo "com.kalaignar.mediamtx" ;;
@@ -26,6 +27,7 @@ get_label() {
 
 get_plist() {
   case "$1" in
+    netharden) echo "/Library/LaunchDaemons/com.kalaignar.yt-net-harden.plist" ;;
     ingest)    echo "/Library/LaunchDaemons/com.kalaignar.yt-ingest.plist" ;;
     bridge)    echo "/Library/LaunchDaemons/com.kalaignar.yt-bridge.plist" ;;
     mediamtx)  echo "/Library/LaunchDaemons/com.kalaignar.mediamtx.plist" ;;
@@ -35,12 +37,12 @@ get_plist() {
   esac
 }
 
-ALL_SERVICES="ingest bridge mediamtx uplink dashboard"
+ALL_SERVICES="netharden ingest bridge mediamtx uplink dashboard"
 
-# Start order: ingest first, then mediamtx, bridge, uplink, dashboard
-START_ORDER="ingest mediamtx bridge uplink dashboard"
+# Start order: netharden first (one-shot), then ingest, mediamtx, bridge, uplink, dashboard
+START_ORDER="netharden ingest mediamtx bridge uplink dashboard"
 # Stop order: reverse
-STOP_ORDER="dashboard uplink bridge mediamtx ingest"
+STOP_ORDER="dashboard uplink bridge mediamtx ingest netharden"
 
 svc_start() {
   local svc="$1"
@@ -79,7 +81,7 @@ svc_status() {
 
 is_valid_service() {
   case "$1" in
-    ingest|bridge|mediamtx|uplink|dashboard) return 0 ;;
+    netharden|ingest|bridge|mediamtx|uplink|dashboard) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -188,7 +190,7 @@ case "${cmd}" in
     cat <<USAGE
 Usage: ${0##*/} [SERVICE] {start|stop|restart|status|logs|follow|ffmpeg}
 
-Services: ingest  bridge  mediamtx  uplink  dashboard  all (default)
+Services: netharden  ingest  bridge  mediamtx  uplink  dashboard  all (default)
 
 Examples:
   ${0##*/} start           # Start all services

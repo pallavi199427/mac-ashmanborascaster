@@ -10,6 +10,9 @@ let profilesData = null; // { active: 'profile1', profiles: { ... } }
 let openEditPanel = null;
 let revealedKeys = {}; // profileId -> true/false
 let pipelineData = null; // { ingest: {running, metrics}, bridge: {running, status}, uplink: {running, metrics}, mediamtx: {running} }
+let uptimeBase = null;        // server-reported uptime_s at last fetch
+let uptimeEpoch = null;       // Date.now() when uptimeBase was set
+let sessionStartedAt = null;  // Date.now() when user last clicked Go Live/Restart
 
 /* ── WebRTC WHEP Player ── */
 let whepPc = null;
@@ -613,9 +616,34 @@ function updateMetrics(m) {
 
   // Pipeline status dots are now handled by fetchPipeline(), not here
 
-  // Uptime in control bar
-  const uptimeEl = document.getElementById('s-uptime');
-  if (uptimeEl) uptimeEl.textContent = running ? fmtUptime(m.uptime_s) : '00:00:00';
+  // Uptime — only tick when state is "running" (actually streaming)
+  const isStreaming = running && m.state === 'running';
+  if (isStreaming && m.uptime_s != null) {
+    // Reject stale uptime from previous session: if we know when we clicked Go Live,
+    // the server's uptime_s must be <= time elapsed since then (plus a 5s grace period)
+    const maxAllowedUptime = sessionStartedAt != null
+      ? (Date.now() - sessionStartedAt) / 1000 + 5
+      : Infinity;
+    if (m.uptime_s > maxAllowedUptime) {
+      // Server hasn't restarted ffmpeg yet — still showing old session uptime, ignore
+    } else if (uptimeBase == null) {
+      // First valid lock-in for this session
+      uptimeBase = m.uptime_s;
+      uptimeEpoch = Date.now();
+    } else {
+      // Re-lock if server uptime dropped significantly (ffmpeg restarted internally)
+      const expectedUptime = uptimeBase + (Date.now() - uptimeEpoch) / 1000;
+      if (m.uptime_s < expectedUptime - 10) {
+        uptimeBase = m.uptime_s;
+        uptimeEpoch = Date.now();
+      }
+    }
+  } else if (!isStreaming) {
+    uptimeBase = null;
+    uptimeEpoch = null;
+    const uptimeEl = document.getElementById('s-uptime');
+    if (uptimeEl) uptimeEl.textContent = '00:00:00';
+  }
 
   // Broadcast status panel
   setText('s-mode', running ? (m.mode || '-') : 'STOPPED');
@@ -821,6 +849,15 @@ function hideConfirmModal() {
 
 async function executeAction(action) {
   actionInProgress = true;
+
+  // Clear stale uptime immediately so ticker doesn't flash old values
+  uptimeBase = null;
+  uptimeEpoch = null;
+  if (action === 'start' || action === 'restart') sessionStartedAt = Date.now();
+  else sessionStartedAt = null;
+  var uptimeEl = document.getElementById('s-uptime');
+  if (uptimeEl) uptimeEl.textContent = '00:00:00';
+
   const btnId = action === 'start' ? 'btn-golive' : action === 'stop' ? 'btn-stoplive' : 'btn-restart';
   const btn = document.getElementById(btnId);
   const orig = btn ? btn.innerHTML : '';
@@ -828,13 +865,14 @@ async function executeAction(action) {
   updateButtonStates(lastServiceState);
 
   try {
-    // Restart ingest on start/restart so it picks up current profile bitrate
+    // Restart ingest in background so it picks up current profile bitrate
+    // (fire-and-forget — old ingest keeps running until launchd replaces it)
     if (action === 'start' || action === 'restart') {
-      await fetch('/api/control', {
+      fetch('/api/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'restart', service: 'ingest' })
-      });
+      }).catch(function() {});
     }
     const res = await fetch('/api/control', {
       method: 'POST',
@@ -919,6 +957,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Clock
   updateClock();
   setInterval(updateClock, 1000);
+
+  // Uptime ticker — increments client-side every second between server polls
+  setInterval(function() {
+    const el = document.getElementById('s-uptime');
+    if (!el) return;
+    if (uptimeBase != null && uptimeEpoch != null) {
+      const elapsed = (Date.now() - uptimeEpoch) / 1000;
+      el.textContent = fmtUptime(uptimeBase + elapsed);
+    }
+  }, 1000);
 
   // Modal
   const modal = document.getElementById('confirmModal');
