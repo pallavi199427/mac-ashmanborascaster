@@ -119,7 +119,7 @@ build_ffmpeg_live_cmd() {
   -vf "${vf}" \\
   -af "aresample=async=1:first_pts=0" \\
   -color_primaries ${COLOR_PRIMARIES} -color_trc ${COLOR_TRC} -colorspace ${COLOR_SPACE} -color_range tv \\
-  -c:v h264_videotoolbox -profile:v high -level 4.2 \\
+  -c:v h264_videotoolbox -allow_sw 1 -realtime 0 -profile:v high -level 4.2 \\
   -b:v ${bitrate} -maxrate ${bitrate} -bufsize ${bufsize} \\
   -g ${GOP} -keyint_min ${KEYINT_MIN} \\
   -pix_fmt yuv420p \\
@@ -149,7 +149,7 @@ TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE}" \\
   -filter_complex "${overlay_prefix}drawtext=fontfile=${FONT_FILE}:text='${STANDBY_TITLE}':x=${TEXT_X}:y=${TEXT_Y}:fontsize=${TITLE_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.35:boxborderw=18,drawtext=fontfile=${FONT_FILE}:text='%{localtime\\:%Y-%m-%d %H\\\\:%M\\\\:%S}':x=${TEXT_X}:y=${TEXT_Y}+${CLOCK_DY}:fontsize=${CLOCK_FONTSIZE}:fontcolor=white:box=1:boxcolor=black@0.25:boxborderw=14,drawtext=fontfile=${FONT_FILE}:text='${STANDBY_SUBTITLE}':x=${TEXT_X}:y=${TEXT_Y}+${SUBTITLE_DY}:fontsize=${SUBTITLE_FONTSIZE}:fontcolor=white@0.95" \\
   -map 0:v:0 -map 2:a:0 \\
-  -c:v h264_videotoolbox -profile:v high -level 4.2 \\
+  -c:v h264_videotoolbox -allow_sw 1 -realtime 0 -profile:v high -level 4.2 \\
   -b:v ${BITRATE_MAX_K} -maxrate ${BITRATE_MAX_K} -bufsize ${BUFSIZE_MAX_K} \\
   -g ${GOP} -keyint_min ${KEYINT_MIN} -pix_fmt yuv420p \\
   $(audio_args) \\
