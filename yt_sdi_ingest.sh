@@ -126,7 +126,7 @@ build_ffmpeg_live_cmd() {
   $(audio_args) \\
   -stats_period 1 -progress "${PROGRESS_FILE}" \\
   -mpegts_flags pat_pmt_at_frames \\
-  -f mpegts -muxrate 18M \\
+  -f mpegts -muxrate 8M \\
   "${MULTICAST_OUTPUT}"
 EOF
 }
@@ -155,7 +155,7 @@ TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   $(audio_args) \\
   -stats_period 1 -progress "${PROGRESS_FILE}" \\
   -mpegts_flags pat_pmt_at_frames \\
-  -f mpegts -muxrate 18M \\
+  -f mpegts -muxrate 8M \\
   "${MULTICAST_OUTPUT}"
 EOF
 }
