@@ -26,7 +26,7 @@ MULTICAST_IP="${MULTICAST_IP:-239.20.0.10}"
 MULTICAST_PORT="${MULTICAST_PORT:-5000}"
 MEDIAMTX_RTSP_URL="${MEDIAMTX_RTSP_URL:-rtsp://localhost:8554/stream}"
 
-MULTICAST_INPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=2097152&timeout=5000000&localaddr=127.0.0.1"
+MULTICAST_INPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=2097152&timeout=5000000"
 
 FFMPEG_BIN="${FFMPEG_BIN:-/usr/local/bin/ffmpeg}"
 
