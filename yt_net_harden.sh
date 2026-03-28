@@ -118,12 +118,21 @@ wait_for_dns() {
   log "DNS resolved ${host} after ${i}s"
 }
 
+# ---------- Multicast route ----------
+add_multicast_route() {
+  log "Adding multicast route 239.0.0.0/8 via loopback"
+  run_root /sbin/route add -net 239.0.0.0/8 127.0.0.1 >/dev/null 2>&1 || \
+    log "WARN: Could not add multicast route (may already exist)"
+  log "Multicast route set"
+}
+
 # ---------- Main ----------
 main() {
   log "Boot-time network hardening starting"
   rm -f "${STAMP_FILE}" 2>/dev/null || true
 
   harden_network
+  add_multicast_route
   wait_for_dns
 
   date -u +"%Y-%m-%dT%H:%M:%SZ" > "${STAMP_FILE}"
