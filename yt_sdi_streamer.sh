@@ -51,7 +51,7 @@ chmod 755 "${LOG_DIR}"
 # ---------- Multicast input ----------
 MULTICAST_IP="${MULTICAST_IP:-239.20.0.10}"
 MULTICAST_PORT="${MULTICAST_PORT:-5000}"
-MULTICAST_INPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=2097152&timeout=5000000"
+MULTICAST_INPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?fifo_size=1000000&overrun_nonfatal=1&buffer_size=2097152&timeout=5000000&localaddr=127.0.0.1"
 
 # ---------- Uplink mode ----------
 UPLINK_REENCODE="${UPLINK_REENCODE:-false}"
