@@ -306,7 +306,7 @@ build_ffmpeg_uplink_cmd() {
     local vf
     vf="$(build_live_vf)"
     cat <<EOF
-"${FFMPEG_BIN}" -hide_banner -loglevel info \\
+"${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   -fflags +discardcorrupt+nobuffer \\
   -flags low_delay \\
   -err_detect ignore_err \\
@@ -329,7 +329,7 @@ EOF
     # Remux mode: copy video, re-encode audio to fix timestamp discontinuities
     # from multicast UDP jitter/packet loss (prevents crackling on YouTube)
     cat <<EOF
-"${FFMPEG_BIN}" -hide_banner -loglevel info \\
+"${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   -fflags +discardcorrupt+nobuffer \\
   -flags low_delay \\
   -err_detect ignore_err \\

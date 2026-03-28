@@ -123,7 +123,7 @@ run_root() {
 # ---------- Log size management ----------
 cleanup_logs_by_size() {
   local max_events_mb="${MAX_EVENTS_LOG_MB:-200}"
-  local max_ffmpeg_mb="${MAX_FFMPEG_LOG_MB:-500}"
+  local max_ffmpeg_mb="${MAX_FFMPEG_LOG_MB:-10}"
 
   if [[ -f "${EVENTS_LOG}" ]]; then
     local sz
@@ -138,7 +138,7 @@ cleanup_logs_by_size() {
     local sz
     sz=$(du -m "${FFMPEG_LOG}" | awk '{print $1}')
     if [[ "${sz}" -gt "${max_ffmpeg_mb}" ]]; then
-      tail -n 200000 "${FFMPEG_LOG}" > "${FFMPEG_LOG}.tmp" && mv "${FFMPEG_LOG}.tmp" "${FFMPEG_LOG}"
+      tail -n 5000 "${FFMPEG_LOG}" > "${FFMPEG_LOG}.tmp" && mv "${FFMPEG_LOG}.tmp" "${FFMPEG_LOG}"
       log_event "WARN" "log_trim" "Trimmed ffmpeg log (safety)" "\"max_mb\":${max_ffmpeg_mb}"
     fi
   fi

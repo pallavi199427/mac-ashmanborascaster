@@ -111,7 +111,7 @@ build_ffmpeg_live_cmd() {
   local bufsize="${BUFSIZE_MAX_K}"
 
   cat <<EOF
-"${FFMPEG_BIN}" -hide_banner -loglevel info \\
+"${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   -thread_queue_size 8192 \\
   -fflags +genpts -use_wallclock_as_timestamps 1 \\
   -f decklink -video_input ${VIDEO_INPUT} -audio_input ${AUDIO_INPUT} \\
@@ -143,7 +143,7 @@ build_ffmpeg_standby_cmd() {
   local standby_res="${OUTPUT_RESOLUTION:-1920x1080}"
 
   cat <<EOF
-TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel info \\
+TZ="${CLOCK_TZ}" "${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   -f lavfi -i "color=c=${STANDBY_BG_COLOR}:s=${standby_res}:r=${STANDBY_FPS}" \\
   ${logo_input} \\
   -f lavfi -i "anullsrc=channel_layout=stereo:sample_rate=${AUDIO_RATE}" \\
