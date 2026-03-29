@@ -7,6 +7,7 @@ import re
 import secrets
 import subprocess
 import time
+from datetime import timedelta
 
 # Fix for _www user having no accessible working directory
 try:
@@ -45,7 +46,29 @@ LOCAL_STATIC = os.path.join(SCRIPT_DIR, "static")
 STATIC_DIR = INSTALL_STATIC if os.path.isdir(INSTALL_STATIC) else LOCAL_STATIC
 
 app = Flask(__name__, static_folder=STATIC_DIR)
-app.secret_key = os.environ.get("DASHBOARD_SECRET", secrets.token_hex(32))
+
+# Use a stable secret key so sessions survive app restarts
+_secret_key_path = "/var/lib/yt-dashboard/.secret_key"
+def _load_or_create_secret_key():
+    try:
+        with open(_secret_key_path, "r") as f:
+            key = f.read().strip()
+            if key:
+                return key
+    except FileNotFoundError:
+        pass
+    key = secrets.token_hex(32)
+    try:
+        os.makedirs(os.path.dirname(_secret_key_path), mode=0o700, exist_ok=True)
+        with open(_secret_key_path, "w") as f:
+            f.write(key)
+        os.chmod(_secret_key_path, 0o600)
+    except OSError:
+        pass
+    return key
+
+app.secret_key = os.environ.get("DASHBOARD_SECRET", _load_or_create_secret_key())
+app.permanent_session_lifetime = timedelta(days=30)
 
 # ---------- Helpers ----------
 
@@ -204,6 +227,7 @@ def login():
         username = request.form.get("username", "")
         password = request.form.get("password", "")
         if username == DASHBOARD_USER and password == DASHBOARD_PASS:
+            session.permanent = True
             session["logged_in"] = True
             return redirect(url_for("index"))
         return render_template_string(LOGIN_HTML, error="Invalid credentials")
