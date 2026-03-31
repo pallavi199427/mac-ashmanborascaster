@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Temp files
+/tmp/
