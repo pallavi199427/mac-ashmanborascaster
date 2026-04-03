@@ -18,6 +18,17 @@
 #   ALERTS_DIR, ALERT_SCRIPT
 ###############################################################################
 
+# ---------- Auto-detected SDI format (set by probe_sdi_signal) ----------
+DETECTED_FPS_NUM=""
+DETECTED_FPS_DEN=""
+DETECTED_SCAN=""
+DETECTED_FIELD_ORDER=""
+DETECTED_WIDTH=""
+DETECTED_HEIGHT=""
+DETECTED_GOP=""
+DETECTED_VF_FPS=""
+LAST_DETECTED_FORMAT=""
+
 # ---------- Helpers ----------
 ts_utc() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
@@ -228,9 +239,30 @@ audio_args() {
 
 # ---------- Video filter ----------
 build_live_vf() {
+  # Manual override: if set, use it verbatim
+  if [[ -n "${LIVE_VIDEO_FILTER_OVERRIDE:-}" ]]; then
+    printf '%s' "${LIVE_VIDEO_FILTER_OVERRIDE}"
+    return 0
+  fi
+
   local res="${OUTPUT_RESOLUTION:-1920x1080}"
   local wh="${res/x/:}"
-  printf '%s' "bwdif=mode=1:parity=tff:deint=all,fps=25,scale=${wh}:flags=lanczos,format=yuv420p"
+
+  # Use auto-detected values, fall back to defaults (1080i50)
+  local scan="${DETECTED_SCAN:-interlaced}"
+  local field_order="${DETECTED_FIELD_ORDER:-tff}"
+  local vf_fps="${DETECTED_VF_FPS:-25}"
+
+  local vf=""
+  if [[ "${scan}" == "interlaced" ]]; then
+    vf="bwdif=mode=1:parity=${field_order}:deint=all,fps=${vf_fps},"
+  else
+    # Progressive: no deinterlace needed
+    vf="fps=${vf_fps},"
+  fi
+
+  vf="${vf}scale=${wh}:flags=lanczos,format=yuv420p"
+  printf '%s' "${vf}"
 }
 
 # ---------- SDI Signal Detection ----------
@@ -238,7 +270,8 @@ probe_sdi_signal() {
   local probe_out_file="${LOG_DIR}/probe_out.$$"
 
   "${FFMPEG_BIN}" -hide_banner -loglevel info \
-      -f decklink -video_input "${VIDEO_INPUT}" -audio_input "${AUDIO_INPUT}" \
+      -f decklink -raw_format auto \
+      -video_input "${VIDEO_INPUT}" -audio_input "${AUDIO_INPUT}" \
       -i "${DECKLINK_DEVICE}" \
       -t 1 -f null - >"${probe_out_file}" 2>&1 &
   local probe_pid=$!
@@ -266,11 +299,82 @@ probe_sdi_signal() {
   if echo "${out}" | grep -qiE "No input signal detected|No signal|Cannot Autodetect input"; then
     return 1
   fi
-  if echo "${out}" | grep -q "Input #0, decklink"; then
-    return 0
+  if ! echo "${out}" | grep -q "Input #0, decklink"; then
+    return 1
   fi
 
-  return 1
+  # --- Parse detected format from Video stream line ---
+  # Video may be Stream #0:0 or #0:1 depending on device
+  local stream_line
+  stream_line="$(echo "${out}" | grep -E 'Stream #0:[0-9]+.*Video:' | head -n 1)"
+
+  if [[ -n "${stream_line}" ]]; then
+    # Detect scan type and field order
+    # DeckLink reports: "uyvy422(top first)" for TFF interlaced,
+    #                   "uyvy422(bottom first)" for BFF interlaced,
+    #                   "uyvy422(progressive)" for progressive
+    if echo "${stream_line}" | grep -qi "top first"; then
+      DETECTED_SCAN="interlaced"
+      DETECTED_FIELD_ORDER="tff"
+    elif echo "${stream_line}" | grep -qi "bottom first"; then
+      DETECTED_SCAN="interlaced"
+      DETECTED_FIELD_ORDER="bff"
+    elif echo "${stream_line}" | grep -qi "progressive"; then
+      DETECTED_SCAN="progressive"
+      DETECTED_FIELD_ORDER=""
+    fi
+
+    # Parse resolution (e.g. 1920x1080)
+    local res_match
+    res_match="$(echo "${stream_line}" | grep -oE '[0-9]{3,4}x[0-9]{3,4}' | head -n 1)"
+    if [[ -n "${res_match}" ]]; then
+      DETECTED_WIDTH="${res_match%%x*}"
+      DETECTED_HEIGHT="${res_match##*x}"
+    fi
+
+    # Parse fps from tbr (e.g. "25 tbr" or "29.97 tbr") or fps
+    local fps_match
+    fps_match="$(echo "${stream_line}" | grep -oE '[0-9]+(\.[0-9]+)? tbr' | head -n 1)"
+    fps_match="${fps_match% tbr}"
+    if [[ -z "${fps_match}" ]]; then
+      fps_match="$(echo "${stream_line}" | grep -oE '[0-9]+(\.[0-9]+|/[0-9]+)? fps' | head -n 1)"
+      fps_match="${fps_match% fps}"
+    fi
+
+    if echo "${fps_match}" | grep -q '/'; then
+      DETECTED_FPS_NUM="${fps_match%%/*}"
+      DETECTED_FPS_DEN="${fps_match##*/}"
+    elif [[ -n "${fps_match}" ]]; then
+      # Map common NTSC drop-frame rates to exact fractions
+      case "${fps_match}" in
+        29.97*) DETECTED_FPS_NUM="30000"; DETECTED_FPS_DEN="1001" ;;
+        59.94*) DETECTED_FPS_NUM="60000"; DETECTED_FPS_DEN="1001" ;;
+        23.98*) DETECTED_FPS_NUM="24000"; DETECTED_FPS_DEN="1001" ;;
+        *)      DETECTED_FPS_NUM="${fps_match}"; DETECTED_FPS_DEN="1" ;;
+      esac
+    fi
+
+    # Derive output fps and GOP from detected framerate
+    if [[ -n "${DETECTED_FPS_NUM}" && -n "${DETECTED_FPS_DEN}" ]]; then
+      DETECTED_VF_FPS="$(awk "BEGIN {printf \"%.4g\", ${DETECTED_FPS_NUM}/${DETECTED_FPS_DEN}}")"
+      # GOP = 2 seconds * fps (rounded)
+      DETECTED_GOP="$(awk "BEGIN {printf \"%d\", 2 * ${DETECTED_FPS_NUM}/${DETECTED_FPS_DEN} + 0.5}")"
+    fi
+
+    # Write detected format to shared file for other services (e.g. uplink)
+    if [[ -n "${DETECTED_GOP}" ]]; then
+      printf 'DETECTED_GOP=%s\nDETECTED_VF_FPS=%s\nDETECTED_SCAN=%s\nDETECTED_FIELD_ORDER=%s\nDETECTED_WIDTH=%s\nDETECTED_HEIGHT=%s\n' \
+        "${DETECTED_GOP}" "${DETECTED_VF_FPS}" "${DETECTED_SCAN}" "${DETECTED_FIELD_ORDER}" \
+        "${DETECTED_WIDTH}" "${DETECTED_HEIGHT}" \
+        > "${LOG_DIR}/detected_format.env"
+    fi
+
+    log_event "INFO" "signal_detected" \
+      "SDI signal: ${DETECTED_WIDTH}x${DETECTED_HEIGHT} ${DETECTED_VF_FPS}fps ${DETECTED_SCAN} ${DETECTED_FIELD_ORDER}" \
+      "\"width\":${DETECTED_WIDTH:-0},\"height\":${DETECTED_HEIGHT:-0},\"fps_num\":${DETECTED_FPS_NUM:-0},\"fps_den\":${DETECTED_FPS_DEN:-0},\"scan\":\"${DETECTED_SCAN:-unknown}\",\"field_order\":\"${DETECTED_FIELD_ORDER:-}\",\"gop\":${DETECTED_GOP:-0},\"vf_fps\":\"${DETECTED_VF_FPS:-}\""
+  fi
+
+  return 0
 }
 
 # ---------- Kill FFmpeg ----------
@@ -515,6 +619,16 @@ supervisor_loop() {
       OK_COUNT=$((OK_COUNT+1))
       BAD_COUNT=0
       echo "1" > "${SDI_SIGNAL_FILE}"
+
+      # Detect format changes — restart ffmpeg if input format changed
+      local _fmt_key="${DETECTED_WIDTH:-}x${DETECTED_HEIGHT:-}_${DETECTED_FPS_NUM:-}/${DETECTED_FPS_DEN:-}_${DETECTED_SCAN:-}"
+      if [[ -n "${LAST_DETECTED_FORMAT}" && "${_fmt_key}" != "${LAST_DETECTED_FORMAT}" ]]; then
+        log_event "WARN" "format_change" "SDI format changed: ${LAST_DETECTED_FORMAT} -> ${_fmt_key}" \
+          "\"old\":\"${LAST_DETECTED_FORMAT}\",\"new\":\"${_fmt_key}\",\"gop\":${DETECTED_GOP:-0},\"fps\":\"${DETECTED_VF_FPS:-}\""
+        run_alert "format_change" "{\"old\":\"${LAST_DETECTED_FORMAT}\",\"new\":\"${_fmt_key}\"}"
+        kill_running_ffmpeg
+      fi
+      LAST_DETECTED_FORMAT="${_fmt_key}"
     else
       PROBE_BAD_COUNT=$((PROBE_BAD_COUNT+1))
       BAD_COUNT=$((BAD_COUNT+1))

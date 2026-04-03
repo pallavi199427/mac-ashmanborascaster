@@ -47,9 +47,10 @@ chmod 755 "${LOG_DIR}"
 # ---------- Multicast config ----------
 MULTICAST_IP="${MULTICAST_IP:-239.20.0.10}"
 MULTICAST_PORT="${MULTICAST_PORT:-5000}"
-MULTICAST_TTL="${MULTICAST_TTL:-1}"
+MULTICAST_TTL="${MULTICAST_TTL:-0}"
+MULTICAST_LOCAL_ADDR="${MULTICAST_LOCAL_ADDR:-127.0.0.1}"
 MULTICAST_PKT_SIZE="${MULTICAST_PKT_SIZE:-1316}"
-MULTICAST_OUTPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?pkt_size=${MULTICAST_PKT_SIZE}&ttl=${MULTICAST_TTL}"
+MULTICAST_OUTPUT="udp://${MULTICAST_IP}:${MULTICAST_PORT}?pkt_size=${MULTICAST_PKT_SIZE}&ttl=${MULTICAST_TTL}&localaddr=${MULTICAST_LOCAL_ADDR}"
 
 # ---------- Singleton ----------
 LOCK_FILE="/var/run/yt-sdi-ingest.lock"
@@ -114,7 +115,7 @@ build_ffmpeg_live_cmd() {
 "${FFMPEG_BIN}" -hide_banner -loglevel warning \\
   -thread_queue_size 8192 \\
   -fflags +genpts -use_wallclock_as_timestamps 1 \\
-  -f decklink -video_input ${VIDEO_INPUT} -audio_input ${AUDIO_INPUT} \\
+  -f decklink -raw_format auto -video_input ${VIDEO_INPUT} -audio_input ${AUDIO_INPUT} \\
   -i "${DECKLINK_DEVICE}" \\
   -vf "${vf}" \\
   -af "aresample=async=1:first_pts=0" \\
