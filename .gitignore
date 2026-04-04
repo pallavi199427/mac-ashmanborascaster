@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Temp files
+/tmp/
+
+# Unrelated local folders/files
+mac-ashman-broadcaster-code/
+mac-ashmanbroadcaster-master/
+mac-ashmanbroadcaster-master.zip
+yt-appliance-4k-aja/
+aja_broadcast.sh
+decklink_broadcast.sh
+decklink_controller.py
+zmq_ffmpeg.sh
+st.sh
+USAGE.md
+.codex

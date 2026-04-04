@@ -88,7 +88,20 @@ sudo install -m 644 "${MEDIAMTX_YML_SRC}" "${LIB_DIR}/mediamtx.yml"
 
 # ---------- Install config ----------
 if [[ -f "${CONF_DST}" && "${FORCE}" -ne 1 ]]; then
-  echo "== Config exists at ${CONF_DST}; leaving it in place (use --force to overwrite) =="
+  echo "== Config exists — preserving STREAM_KEY, DASHBOARD_USER, DASHBOARD_PASS; updating all other values =="
+  # Extract preserved values from existing config
+  _stream_key="$(sudo grep -E '^STREAM_KEY=' "${CONF_DST}" | head -1 | cut -d= -f2-)"
+  _dash_user="$(sudo grep -E '^DASHBOARD_USER=' "${CONF_DST}" | head -1 | cut -d= -f2-)"
+  _dash_pass="$(sudo grep -E '^DASHBOARD_PASS=' "${CONF_DST}" | head -1 | cut -d= -f2-)"
+
+  # Install new config
+  sudo install -m 600 "${CONF_SRC}" "${CONF_DST}"
+
+  # Restore preserved values if they were set
+  [[ -n "${_stream_key}" ]] && sudo sed -i '' "s|^STREAM_KEY=.*|STREAM_KEY=${_stream_key}|" "${CONF_DST}"
+  [[ -n "${_dash_user}" ]]  && sudo sed -i '' "s|^DASHBOARD_USER=.*|DASHBOARD_USER=${_dash_user}|" "${CONF_DST}"
+  [[ -n "${_dash_pass}" ]]  && sudo sed -i '' "s|^DASHBOARD_PASS=.*|DASHBOARD_PASS=${_dash_pass}|" "${CONF_DST}"
+  echo "== Config updated =="
 else
   sudo install -m 600 "${CONF_SRC}" "${CONF_DST}"
 fi
