@@ -542,22 +542,32 @@ def api_speedtest_run():
 
     def _run():
         try:
-            payload = b"\x00" * (8 * 1024 * 1024)
-            result = subprocess.run(
-                [
-                    "curl", "-s", "-o", "/dev/null", "-X", "POST",
-                    "--data-binary", "@-", "--max-time", "20",
-                    "-w", "%{speed_upload}",
-                    "https://speed.cloudflare.com/__up"
-                ],
-                input=payload,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=25
-            )
-            if result.returncode == 0 and result.stdout:
-                bps = float(result.stdout.decode().strip())
-                mbps = round(bps * 8 / 1_000_000, 2)
+            # Run 3 passes and average to smooth out TCP slow-start variance.
+            # 32 MB per pass ensures the connection is well past slow-start on
+            # high-bandwidth links before curl reports the speed.
+            payload = b"\x00" * (32 * 1024 * 1024)
+            samples = []
+            for _ in range(3):
+                result = subprocess.run(
+                    [
+                        "curl", "-s", "-o", "/dev/null", "-X", "POST",
+                        "--data-binary", "@-", "--max-time", "30",
+                        "-w", "%{speed_upload}",
+                        "https://speed.cloudflare.com/__up"
+                    ],
+                    input=payload,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=35
+                )
+                if result.returncode == 0 and result.stdout:
+                    bps = float(result.stdout.decode().strip())
+                    samples.append(bps)
+                else:
+                    break
+            if samples:
+                avg_bps = sum(samples) / len(samples)
+                mbps = round(avg_bps * 8 / 1_000_000, 2)
                 _speedtest_result.update({"status": "done", "mbps": mbps, "ts": time.time()})
             else:
                 _speedtest_result.update({"status": "error", "message": "curl failed or timed out"})
