@@ -542,27 +542,30 @@ def api_speedtest_run():
 
     def _run():
         try:
-            payload = b"\x00" * (25 * 1024 * 1024)
             result = subprocess.run(
-                [
-                    "curl", "-s", "-o", "/dev/null", "-X", "POST",
-                    "--data-binary", "@-", "--max-time", "30",
-                    "-w", "%{speed_upload}",
-                    "https://speed.cloudflare.com/__up"
-                ],
-                input=payload,
+                ["speedtest-cli", "--simple"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=35
+                stderr=subprocess.PIPE,
+                timeout=60
             )
             if result.returncode == 0 and result.stdout:
-                bps = float(result.stdout.decode().strip())
-                mbps = round(bps * 8 / 1_000_000, 2)
-                _speedtest_result.update({"status": "done", "mbps": mbps, "ts": time.time()})
+                upload_mbps = None
+                for line in result.stdout.decode().splitlines():
+                    if line.startswith("Upload:"):
+                        # "Upload: 782.16 Mbit/s"
+                        parts = line.split()
+                        upload_mbps = round(float(parts[1]), 2)
+                if upload_mbps is not None:
+                    _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
+                else:
+                    _speedtest_result.update({"status": "error", "message": "Could not parse speedtest output"})
             else:
-                _speedtest_result.update({"status": "error", "message": "curl failed or timed out"})
+                err = result.stderr.decode().strip() or "speedtest-cli failed"
+                _speedtest_result.update({"status": "error", "message": err})
         except subprocess.TimeoutExpired:
             _speedtest_result.update({"status": "error", "message": "Test timed out"})
+        except FileNotFoundError:
+            _speedtest_result.update({"status": "error", "message": "speedtest-cli not found — install with: pip install speedtest-cli"})
         except Exception as e:
             _speedtest_result.update({"status": "error", "message": str(e)})
         finally:
