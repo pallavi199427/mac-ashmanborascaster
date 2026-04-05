@@ -1143,6 +1143,18 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(fetchEvents, EVENTS_POLL_MS);
   setInterval(fetchPipeline, PIPELINE_POLL_MS);
 
+  // Restore last BW CHECK result if available
+  fetch('/api/speedtest/result')
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'done' && data.mbps != null) {
+        const area = document.getElementById('bw-result-area');
+        if (area) area.style.display = '';
+        renderSpeedTestResult(data);
+      }
+    })
+    .catch(() => {});
+
   // Start WebRTC preview player
   startWhepPlayer();
 });
