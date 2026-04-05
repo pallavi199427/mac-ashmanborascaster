@@ -946,6 +946,12 @@ function pollSpeedTestResult() {
       .then(r => r.json())
       .then(data => {
         if (data.status === 'running') {
+          // Show live current speed while test is in progress
+          if (data.current_mbps != null) {
+            setText('bw-speed', data.current_mbps.toFixed(1) + ' Mbps ↑');
+            const btn = document.getElementById('btn-bwcheck');
+            if (btn) btn.innerHTML = '<span class="spinner"></span>' + data.current_mbps.toFixed(0) + ' Mbps...';
+          }
           pollSpeedTestResult();
         } else if (data.status === 'done') {
           renderSpeedTestResult(data);

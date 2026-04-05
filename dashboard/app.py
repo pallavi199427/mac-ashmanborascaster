@@ -541,34 +541,85 @@ def api_speedtest_run():
         return jsonify({"status": "running"}), 409
 
     def _run():
-        # Upload /dev/zero to Cloudflare's speed test endpoint for 10s
-        # curl reports average speed_upload in bytes/sec over the full duration
+        # Upload /dev/zero to Cloudflare for 15s, parsing live progress each second.
+        # curl --progress-bar writes lines like: "##...  34.6M  0  346M  0  34.6M  0  34.6M --:--:-- 0:00:09 --:--:-- 36.2M"
+        # We use -# (progress bar) to stderr so we can parse current speed per second.
+        # Skip first 3s (TCP slow start), average remaining samples for final result.
         TEST_URL = "https://speed.cloudflare.com/__up"
-        TEST_DURATION = 10
+        TEST_DURATION = 15
+        WARMUP_SECS = 3
+
+        import re
+        samples = []  # (elapsed_sec, mbps)
 
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 [
-                    "curl", "-s", "-o", "/dev/null",
-                    "--upload-file", "/dev/zero",
+                    "curl", "--upload-file", "/dev/zero",
                     "--max-time", str(TEST_DURATION),
-                    "-w", "%{speed_upload}",
+                    "-o", "/dev/null",
+                    "--progress-bar",
                     TEST_URL
                 ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=TEST_DURATION + 10
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE
             )
-            output = result.stdout.decode().strip()
-            if output:
-                bytes_per_sec = float(output)
-                upload_mbps = round(bytes_per_sec * 8 / 1_000_000, 2)
+
+            start = time.time()
+            buf = b""
+            while True:
+                chunk = proc.stderr.read(1)
+                if not chunk:
+                    break
+                if chunk in (b'\r', b'\n'):
+                    line = buf.decode("utf-8", errors="ignore").strip()
+                    buf = b""
+                    if not line:
+                        continue
+                    # curl progress bar line format (space-separated numbers):
+                    # % Total  % Received  % Xferd  Avg Speed  Time  Time  Time  Current Speed
+                    # Last token on the line is current upload speed e.g. "36.2M" or "1.04M"
+                    parts = line.split()
+                    if len(parts) >= 1:
+                        raw = parts[-1]
+                        multiplier = 1
+                        if raw.endswith('G'):
+                            multiplier = 1024
+                            raw = raw[:-1]
+                        elif raw.endswith('M'):
+                            multiplier = 1
+                            raw = raw[:-1]
+                        elif raw.endswith('k'):
+                            multiplier = 1 / 1024
+                            raw = raw[:-1]
+                        else:
+                            continue
+                        try:
+                            mbytes_per_sec = float(raw) * multiplier
+                            mbps = round(mbytes_per_sec * 8, 2)
+                            elapsed = time.time() - start
+                            samples.append((elapsed, mbps))
+                            # Update live current speed
+                            _speedtest_result.update({"status": "running", "current_mbps": mbps})
+                        except ValueError:
+                            pass
+                else:
+                    buf += chunk
+
+            proc.wait()
+
+            # Average samples past warmup period
+            stable = [mbps for (elapsed, mbps) in samples if elapsed >= WARMUP_SECS]
+            if stable:
+                upload_mbps = round(sum(stable) / len(stable), 2)
+                _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
+            elif samples:
+                # fallback: average all samples if warmup never completed
+                upload_mbps = round(sum(s[1] for s in samples) / len(samples), 2)
                 _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
             else:
-                err = result.stderr.decode().strip() or "curl upload test failed"
-                _speedtest_result.update({"status": "error", "message": err})
-        except subprocess.TimeoutExpired:
-            _speedtest_result.update({"status": "error", "message": "Upload test timed out"})
+                _speedtest_result.update({"status": "error", "message": "Could not measure upload speed"})
+
         except Exception as e:
             _speedtest_result.update({"status": "error", "message": str(e)})
         finally:
