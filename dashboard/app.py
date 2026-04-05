@@ -541,16 +541,28 @@ def api_speedtest_run():
         return jsonify({"status": "running"}), 409
 
     def _run():
-        # Upload /dev/zero to Cloudflare for 15s, parsing live progress each second.
-        # curl --progress-bar writes lines like: "##...  34.6M  0  346M  0  34.6M  0  34.6M --:--:-- 0:00:09 --:--:-- 36.2M"
-        # We use -# (progress bar) to stderr so we can parse current speed per second.
+        # Upload /dev/zero to Cloudflare for 15s.
+        # curl default progress (no -s) writes one line per second to stderr:
+        #   100  123M    0     0    0  123M      0  12.3M  0:00:10  0:00:09 --:--:-- 14.1M
+        # The last token is current upload speed (MBytes/s). We parse each \r-terminated line.
         # Skip first 3s (TCP slow start), average remaining samples for final result.
         TEST_URL = "https://speed.cloudflare.com/__up"
         TEST_DURATION = 15
         WARMUP_SECS = 3
 
-        import re
         samples = []  # (elapsed_sec, mbps)
+
+        def parse_speed_token(token):
+            """Parse a curl speed token like '14.1M', '512k', '1.2G' → MBytes/s float."""
+            if token.endswith('G'):
+                return float(token[:-1]) * 1024
+            elif token.endswith('M'):
+                return float(token[:-1])
+            elif token.endswith('k'):
+                return float(token[:-1]) / 1024
+            elif token.endswith('B') or token.isdigit():
+                return float(token.rstrip('B')) / (1024 * 1024)
+            return None
 
         try:
             proc = subprocess.Popen(
@@ -558,8 +570,7 @@ def api_speedtest_run():
                     "curl", "--upload-file", "/dev/zero",
                     "--max-time", str(TEST_DURATION),
                     "-o", "/dev/null",
-                    "--progress-bar",
-                    TEST_URL
+                    TEST_URL          # no -s: default verbose progress to stderr
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE
@@ -576,32 +587,17 @@ def api_speedtest_run():
                     buf = b""
                     if not line:
                         continue
-                    # curl progress bar line format (space-separated numbers):
-                    # % Total  % Received  % Xferd  Avg Speed  Time  Time  Time  Current Speed
-                    # Last token on the line is current upload speed e.g. "36.2M" or "1.04M"
                     parts = line.split()
-                    if len(parts) >= 1:
-                        raw = parts[-1]
-                        multiplier = 1
-                        if raw.endswith('G'):
-                            multiplier = 1024
-                            raw = raw[:-1]
-                        elif raw.endswith('M'):
-                            multiplier = 1
-                            raw = raw[:-1]
-                        elif raw.endswith('k'):
-                            multiplier = 1 / 1024
-                            raw = raw[:-1]
-                        else:
-                            continue
+                    # Progress line has 12 fields; last field is current speed
+                    if len(parts) >= 12:
                         try:
-                            mbytes_per_sec = float(raw) * multiplier
-                            mbps = round(mbytes_per_sec * 8, 2)
-                            elapsed = time.time() - start
-                            samples.append((elapsed, mbps))
-                            # Update live current speed
-                            _speedtest_result.update({"status": "running", "current_mbps": mbps})
-                        except ValueError:
+                            mbytes = parse_speed_token(parts[-1])
+                            if mbytes is not None and mbytes > 0:
+                                mbps = round(mbytes * 8, 2)
+                                elapsed = time.time() - start
+                                samples.append((elapsed, mbps))
+                                _speedtest_result.update({"status": "running", "current_mbps": mbps})
+                        except (ValueError, IndexError):
                             pass
                 else:
                     buf += chunk
@@ -614,7 +610,6 @@ def api_speedtest_run():
                 upload_mbps = round(sum(stable) / len(stable), 2)
                 _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
             elif samples:
-                # fallback: average all samples if warmup never completed
                 upload_mbps = round(sum(s[1] for s in samples) / len(samples), 2)
                 _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
             else:

@@ -917,11 +917,11 @@ function runSpeedTest() {
   const btn = document.getElementById('btn-bwcheck');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Testing...'; }
 
+  // Always show the result area — never hide it once revealed
   const area = document.getElementById('bw-result-area');
   if (area) area.style.display = '';
   setText('bw-speed', 'Testing...');
-  setText('bw-required', '-');
-  setText('bw-tested-at', '-');
+  // Keep Required/Tested/Verdict from last run visible until new result arrives
   const verdictEl = document.getElementById('bw-verdict');
   if (verdictEl) { verdictEl.textContent = ''; verdictEl.className = 'bw-verdict'; }
   const suggEl = document.getElementById('bw-suggestion');
