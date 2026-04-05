@@ -771,6 +771,7 @@ function updateButtonStates(running) {
   const btnGoLive = document.getElementById('btn-golive');
   const btnStopLive = document.getElementById('btn-stoplive');
   const btnRestart = document.getElementById('btn-restart');
+  const btnBwCheck = document.getElementById('btn-bwcheck');
 
   if (actionInProgress) {
     if (btnGoLive) btnGoLive.disabled = true;
@@ -783,14 +784,26 @@ function updateButtonStates(running) {
     if (btnGoLive) { btnGoLive.style.display = 'none'; btnGoLive.disabled = true; }
     if (btnStopLive) { btnStopLive.style.display = ''; btnStopLive.disabled = false; }
     if (btnRestart) btnRestart.disabled = false;
+    if (btnBwCheck) {
+      btnBwCheck.disabled = true;
+      btnBwCheck.title = 'Streaming is live — stop broadcast before running a bandwidth test';
+    }
   } else if (running === false) {
     if (btnGoLive) { btnGoLive.style.display = ''; btnGoLive.disabled = false; }
     if (btnStopLive) { btnStopLive.style.display = 'none'; btnStopLive.disabled = true; }
     if (btnRestart) btnRestart.disabled = true;
+    if (btnBwCheck) {
+      btnBwCheck.disabled = false;
+      btnBwCheck.title = 'Test upload bandwidth before going live';
+    }
   } else {
     if (btnGoLive) { btnGoLive.style.display = ''; btnGoLive.disabled = true; }
     if (btnStopLive) { btnStopLive.style.display = 'none'; btnStopLive.disabled = true; }
     if (btnRestart) btnRestart.disabled = true;
+    if (btnBwCheck) {
+      btnBwCheck.disabled = false;
+      btnBwCheck.title = 'Test upload bandwidth before going live';
+    }
   }
 }
 
@@ -900,6 +913,7 @@ async function executeAction(action) {
 let bwPollTimer = null;
 
 function runSpeedTest() {
+  if (lastServiceState === true) return; // blocked while streaming
   const btn = document.getElementById('btn-bwcheck');
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Testing...'; }
 

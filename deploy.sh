@@ -124,6 +124,18 @@ else
 fi
 echo
 
+# Ensure speedtest-cli is installed
+echo "[..] Checking for speedtest-cli..."
+if [[ -x "/opt/homebrew/bin/speedtest-cli" ]]; then
+  echo "[OK] speedtest-cli already installed"
+else
+  echo "[..] Installing speedtest-cli via pip..."
+  "${PYTHON3}" -m pip install speedtest-cli --break-system-packages 2>/dev/null \
+    || "${PYTHON3}" -m pip install speedtest-cli
+  echo "[OK] speedtest-cli installed"
+fi
+echo
+
 # ── 1c. Dashboard credentials ─────────────────────────────────────────────
 echo "[..] Dashboard login credentials"
 echo "     (Press Enter to keep defaults)"

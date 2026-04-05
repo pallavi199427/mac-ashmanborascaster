@@ -543,7 +543,7 @@ def api_speedtest_run():
     def _run():
         try:
             result = subprocess.run(
-                ["speedtest-cli", "--simple"],
+                ["/opt/homebrew/bin/speedtest-cli", "--simple"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=60
@@ -565,7 +565,7 @@ def api_speedtest_run():
         except subprocess.TimeoutExpired:
             _speedtest_result.update({"status": "error", "message": "Test timed out"})
         except FileNotFoundError:
-            _speedtest_result.update({"status": "error", "message": "speedtest-cli not found — install with: pip install speedtest-cli"})
+            _speedtest_result.update({"status": "error", "message": "speedtest-cli not found at /opt/homebrew/bin/speedtest-cli"})
         except Exception as e:
             _speedtest_result.update({"status": "error", "message": str(e)})
         finally:
