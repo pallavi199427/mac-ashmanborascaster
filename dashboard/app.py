@@ -541,31 +541,57 @@ def api_speedtest_run():
         return jsonify({"status": "running"}), 409
 
     def _run():
+        # iperf3 public servers to try in order (Google Fiber first — same backbone as YouTube)
+        IPERF3_SERVERS = [
+            "iperf.googlefiber.net",
+            "iperf.he.net",
+            "bouygues.iperf.fr",
+        ]
+        IPERF3_PORT = 5201
+        TEST_DURATION = 10  # seconds
+
+        def find_iperf3():
+            for path in ["/opt/homebrew/bin/iperf3", "/usr/local/bin/iperf3", "/usr/bin/iperf3"]:
+                if os.path.isfile(path):
+                    return path
+            import shutil
+            return shutil.which("iperf3")
+
         try:
-            result = subprocess.run(
-                ["/opt/homebrew/bin/speedtest-cli", "--simple"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60
-            )
-            if result.returncode == 0 and result.stdout:
-                upload_mbps = None
-                for line in result.stdout.decode().splitlines():
-                    if line.startswith("Upload:"):
-                        # "Upload: 782.16 Mbit/s"
-                        parts = line.split()
-                        upload_mbps = round(float(parts[1]), 2)
-                if upload_mbps is not None:
-                    _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
-                else:
-                    _speedtest_result.update({"status": "error", "message": "Could not parse speedtest output"})
+            iperf3_bin = find_iperf3()
+            if not iperf3_bin:
+                _speedtest_result.update({"status": "error", "message": "iperf3 not found — install with: brew install iperf3"})
+                return
+
+            upload_mbps = None
+            last_err = "All iperf3 servers failed"
+            for server in IPERF3_SERVERS:
+                try:
+                    result = subprocess.run(
+                        [iperf3_bin, "-c", server, "-p", str(IPERF3_PORT),
+                         "-t", str(TEST_DURATION), "--json"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=TEST_DURATION + 15
+                    )
+                    if result.returncode == 0 and result.stdout:
+                        import json as _json
+                        data = _json.loads(result.stdout.decode())
+                        # sent_bps is the upload (client→server) throughput
+                        bits_per_sec = data["end"]["sum_sent"]["bits_per_second"]
+                        upload_mbps = round(bits_per_sec / 1_000_000, 2)
+                        break
+                    else:
+                        last_err = result.stderr.decode().strip() or f"iperf3 to {server} failed"
+                except subprocess.TimeoutExpired:
+                    last_err = f"iperf3 to {server} timed out"
+                except (KeyError, ValueError, Exception) as e:
+                    last_err = str(e)
+
+            if upload_mbps is not None:
+                _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
             else:
-                err = result.stderr.decode().strip() or "speedtest-cli failed"
-                _speedtest_result.update({"status": "error", "message": err})
-        except subprocess.TimeoutExpired:
-            _speedtest_result.update({"status": "error", "message": "Test timed out"})
-        except FileNotFoundError:
-            _speedtest_result.update({"status": "error", "message": "speedtest-cli not found at /opt/homebrew/bin/speedtest-cli"})
+                _speedtest_result.update({"status": "error", "message": last_err})
         except Exception as e:
             _speedtest_result.update({"status": "error", "message": str(e)})
         finally:

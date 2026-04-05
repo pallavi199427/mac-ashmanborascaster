@@ -124,15 +124,29 @@ else
 fi
 echo
 
-# Ensure speedtest-cli is installed
-echo "[..] Checking for speedtest-cli..."
-if [[ -x "/opt/homebrew/bin/speedtest-cli" ]]; then
-  echo "[OK] speedtest-cli already installed"
+# Ensure iperf3 is installed
+echo "[..] Checking for iperf3..."
+IPERF3_BIN=""
+for candidate in /opt/homebrew/bin/iperf3 /usr/local/bin/iperf3 /usr/bin/iperf3; do
+  if [[ -x "${candidate}" ]]; then
+    IPERF3_BIN="${candidate}"
+    break
+  fi
+done
+
+if [[ -n "${IPERF3_BIN}" ]]; then
+  echo "[OK] iperf3 already installed: ${IPERF3_BIN}"
 else
-  echo "[..] Installing speedtest-cli via pip..."
-  "${PYTHON3}" -m pip install speedtest-cli --break-system-packages 2>/dev/null \
-    || "${PYTHON3}" -m pip install speedtest-cli
-  echo "[OK] speedtest-cli installed"
+  echo "[..] Installing iperf3 via Homebrew..."
+  if command -v brew >/dev/null 2>&1; then
+    brew install iperf3
+    echo "[OK] iperf3 installed"
+  else
+    echo "[WARN] Homebrew not found — installing Homebrew first..."
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    brew install iperf3
+    echo "[OK] iperf3 installed"
+  fi
 fi
 echo
 
