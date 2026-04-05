@@ -124,30 +124,8 @@ else
 fi
 echo
 
-# Ensure iperf3 is installed
-echo "[..] Checking for iperf3..."
-IPERF3_BIN=""
-for candidate in /opt/homebrew/bin/iperf3 /usr/local/bin/iperf3 /usr/bin/iperf3; do
-  if [[ -x "${candidate}" ]]; then
-    IPERF3_BIN="${candidate}"
-    break
-  fi
-done
-
-if [[ -n "${IPERF3_BIN}" ]]; then
-  echo "[OK] iperf3 already installed: ${IPERF3_BIN}"
-else
-  echo "[..] Installing iperf3 via Homebrew..."
-  if command -v brew >/dev/null 2>&1; then
-    brew install iperf3
-    echo "[OK] iperf3 installed"
-  else
-    echo "[WARN] Homebrew not found — installing Homebrew first..."
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    brew install iperf3
-    echo "[OK] iperf3 installed"
-  fi
-fi
+# BW CHECK uses curl (built into macOS) — no extra install needed
+echo "[OK] BW CHECK uses curl (built-in) — no extra dependencies"
 echo
 
 # ── 1c. Dashboard credentials ─────────────────────────────────────────────
