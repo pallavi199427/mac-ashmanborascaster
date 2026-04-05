@@ -532,7 +532,26 @@ def api_save_profile(profile_id):
 
 
 _speedtest_lock = threading.Lock()
-_speedtest_result = {"status": "idle"}
+_BW_CACHE_FILE = "/tmp/bw_last_result.json"
+
+def _load_bw_cache():
+    try:
+        with open(_BW_CACHE_FILE, "r") as f:
+            data = json.load(f)
+            if data.get("status") == "done" and "mbps" in data:
+                return data
+    except Exception:
+        pass
+    return {"status": "idle"}
+
+def _save_bw_cache(result):
+    try:
+        with open(_BW_CACHE_FILE, "w") as f:
+            json.dump(result, f)
+    except Exception:
+        pass
+
+_speedtest_result = _load_bw_cache()
 
 
 @app.route("/api/speedtest/run", methods=["POST"])
@@ -608,10 +627,15 @@ def api_speedtest_run():
             stable = [mbps for (elapsed, mbps) in samples if elapsed >= WARMUP_SECS]
             if stable:
                 upload_mbps = round(sum(stable) / len(stable), 2)
-                _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
             elif samples:
                 upload_mbps = round(sum(s[1] for s in samples) / len(samples), 2)
-                _speedtest_result.update({"status": "done", "mbps": upload_mbps, "ts": time.time()})
+            else:
+                upload_mbps = None
+
+            if upload_mbps is not None:
+                result = {"status": "done", "mbps": upload_mbps, "ts": time.time()}
+                _speedtest_result.update(result)
+                _save_bw_cache(result)
             else:
                 _speedtest_result.update({"status": "error", "message": "Could not measure upload speed"})
 
