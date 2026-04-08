@@ -99,8 +99,16 @@ write_metrics_snapshot() {
   sdi_sig="${sdi_sig//[^0-9-]/}"
   [[ -z "${sdi_sig}" ]] && sdi_sig="-1"
 
+  # Build format label from auto-detected values if available, else fall back to conf
+  local fmt_label="${FORMAT_CODE}"
+  if [[ -n "${DETECTED_WIDTH:-}" && -n "${DETECTED_HEIGHT:-}" && -n "${DETECTED_VF_FPS:-}" ]]; then
+    local scan_char="p"
+    [[ "${DETECTED_SCAN:-}" == "interlaced" ]] && scan_char="i"
+    fmt_label="${DETECTED_HEIGHT}${scan_char}${DETECTED_VF_FPS}"
+  fi
+
   atomic_write "${METRICS_JSON}" <<EOF
-{"ts":"${t}","service":"yt-ingest","uptime_s":${uptime},"mode":"$(json_escape "${MODE}")","state":"$(json_escape "${state}")","sdi_signal":${sdi_sig},"device":"$(json_escape "${DECKLINK_DEVICE}")","format":"$(json_escape "${FORMAT_CODE}")","multicast":"${MULTICAST_IP}:${MULTICAST_PORT}","ffmpeg":${ff_detail},"switching":{"ok_count":${OK_COUNT},"bad_count":${BAD_COUNT},"probe_ok":${PROBE_OK_COUNT},"probe_bad":${PROBE_BAD_COUNT}},"restarts":{"consecutive_failures":${CONSEC_FAILS},"backoff_s":${BACKOFF},"total_mode_starts":${TOTAL_MODE_STARTS},"total_ffmpeg_exits":${TOTAL_FFMPEG_EXITS},"last_exit_rc":${LAST_EXIT_RC}}}
+{"ts":"${t}","service":"yt-ingest","uptime_s":${uptime},"mode":"$(json_escape "${MODE}")","state":"$(json_escape "${state}")","sdi_signal":${sdi_sig},"device":"$(json_escape "${DECKLINK_DEVICE}")","format":"$(json_escape "${fmt_label}")","multicast":"${MULTICAST_IP}:${MULTICAST_PORT}","ffmpeg":${ff_detail},"switching":{"ok_count":${OK_COUNT},"bad_count":${BAD_COUNT},"probe_ok":${PROBE_OK_COUNT},"probe_bad":${PROBE_BAD_COUNT}},"restarts":{"consecutive_failures":${CONSEC_FAILS},"backoff_s":${BACKOFF},"total_mode_starts":${TOTAL_MODE_STARTS},"total_ffmpeg_exits":${TOTAL_FFMPEG_EXITS},"last_exit_rc":${LAST_EXIT_RC}}}
 EOF
 }
 
