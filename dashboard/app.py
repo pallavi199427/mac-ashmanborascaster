@@ -8,6 +8,7 @@ import secrets
 import subprocess
 import threading
 import time
+import urllib.request
 from datetime import timedelta
 
 # Fix for _www user having no accessible working directory
@@ -652,6 +653,28 @@ def api_speedtest_run():
 @app.route("/api/speedtest/result", methods=["GET"])
 def api_speedtest_result():
     return jsonify(_speedtest_result)
+
+
+@app.route("/whep", methods=["POST", "OPTIONS", "GET", "DELETE", "PATCH"])
+def whep_proxy():
+    """Proxy WHEP requests to MediaMTX on localhost:8889 so clients on port 80 can reach WebRTC."""
+    target = "http://127.0.0.1:8889/stream/whep"
+    method = request.method
+    headers = {k: v for k, v in request.headers if k.lower() not in ("host", "content-length")}
+    body = request.get_data() or None
+    req = urllib.request.Request(target, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+            from flask import Response
+            proxy_resp = Response(raw, status=resp.status, content_type=resp.headers.get("Content-Type", "application/sdp"))
+            for h in ("Location", "Link", "Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods"):
+                if resp.headers.get(h):
+                    proxy_resp.headers[h] = resp.headers.get(h)
+            return proxy_resp
+    except Exception as e:
+        from flask import Response
+        return Response(str(e), status=502)
 
 
 @app.route("/api/profiles/switch", methods=["POST"])

@@ -23,7 +23,7 @@ let audioAnalyser = null;
 let audioSource = null;
 let vuAnimFrame = null;
 let isMuted = true;
-const WHEP_URL = window.location.protocol + '//' + window.location.hostname + ':8889/stream/whep';
+const WHEP_URL = window.location.protocol + '//' + window.location.host + '/whep';
 
 async function startWhepPlayer() {
   stopWhepPlayer();

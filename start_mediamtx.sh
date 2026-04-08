@@ -17,8 +17,9 @@ if [[ -n "${DEFAULT_IFACE}" ]]; then
 fi
 
 if [[ -z "${DEFAULT_IP}" ]]; then
-    echo "WARNING: Could not detect default interface IP, falling back to original config"
-    exec /usr/local/bin/mediamtx "$CONFIG"
+    echo "WARNING: Could not detect default interface IP, enabling webrtcIPsFromInterfaces as fallback"
+    sed "s/^webrtcIPsFromInterfaces: no/webrtcIPsFromInterfaces: yes/" "$CONFIG" > "$RUNTIME_CONFIG"
+    exec /usr/local/bin/mediamtx "$RUNTIME_CONFIG"
 fi
 
 echo "Detected default IP: $DEFAULT_IP"
