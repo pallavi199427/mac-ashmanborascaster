@@ -261,7 +261,7 @@ build_live_vf() {
     vf="fps=${vf_fps},"
   fi
 
-  vf="${vf}scale=${wh}:flags=lanczos,format=yuv420p"
+  vf="${vf}format=yuv420p,scale=${wh}:flags=lanczos,format=yuv420p"
   printf '%s' "${vf}"
 }
 
@@ -629,6 +629,8 @@ supervisor_loop() {
         kill_running_ffmpeg
       fi
       LAST_DETECTED_FORMAT="${_fmt_key}"
+      # Let the DeckLink driver fully release before FFmpeg grabs it
+      sleep "${SDI_PROBE_RELEASE_SLEEP:-1}"
     else
       PROBE_BAD_COUNT=$((PROBE_BAD_COUNT+1))
       BAD_COUNT=$((BAD_COUNT+1))

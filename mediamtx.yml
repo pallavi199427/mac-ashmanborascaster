@@ -7,8 +7,9 @@ logLevel: info
 webrtc: yes
 webrtcAddress: :8889
 webrtcLocalUDPAddress: :8189
-# Disable automatic interface scanning to prevent loopback (127.0.0.1)
-# candidates. The startup wrapper injects the real IP via webrtcAdditionalHosts.
+# webrtcIPsFromInterfaces: no — startup script injects the real LAN IP.
+# STUN (webrtcICEServers2) resolves the public/WAN IP automatically at
+# connection time, so this works on any network without hardcoding.
 webrtcIPsFromInterfaces: no
 webrtcAdditionalHosts: []
 webrtcICEServers2:
